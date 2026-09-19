@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agent0ai/spynel/internal/core"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 func formTextPosition(t *testing.T, m model, text string) (int, int) {

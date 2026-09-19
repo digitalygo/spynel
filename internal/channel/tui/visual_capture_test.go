@@ -13,9 +13,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
-	"github.com/agent0ai/spynel/internal/channel"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/theme"
+	"github.com/digitalygo/spynel/internal/channel"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/theme"
 )
 
 // TestVisualCapture writes deterministic full-frame ANSI renders when

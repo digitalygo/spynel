@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 const EventReplayBytes = 4 << 20

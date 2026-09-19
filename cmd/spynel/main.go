@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/agent0ai/spynel/internal/cli"
+	"github.com/digitalygo/spynel/internal/cli"
 )
 
 var version = "dev"

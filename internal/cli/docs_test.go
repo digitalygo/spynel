@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agent0ai/spynel/internal/agentdocs"
+	"github.com/digitalygo/spynel/internal/agentdocs"
 )
 
 func TestParseDocsArgsSupportsPortableFlagAndPageOrdering(t *testing.T) {

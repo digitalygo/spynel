@@ -7,7 +7,7 @@ main() {
   trap 'rm -f "$bootstrap"' 0
   trap 'exit 1' HUP INT TERM
   curl -LfS --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 \
-    -o "$bootstrap" https://spynel.agent-zero.ai/install.sh
+    -o "$bootstrap" https://raw.githubusercontent.com/digitalygo/spynel/main/install.sh
   sh "$bootstrap" --uninstall
 }
 

@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-const REPOSITORY = "agent0ai/spynel";
+const REPOSITORY = "digitalygo/spynel";
 
 function releaseMetadata(tag, prereleaseValue) {
   const match = typeof tag === "string" && tag.startsWith("v") ? SEMVER.exec(tag.slice(1)) : null;

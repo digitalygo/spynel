@@ -10,7 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/agent0ai/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 // HarnessConfig is the provider-neutral runtime contract used to construct a

@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-const defaultGitHubURL = "https://api.github.com/repos/agent0ai/spynel/releases/latest"
-const defaultDownloadURL = "https://github.com/agent0ai/spynel/releases/download/v"
+const defaultGitHubURL = "https://api.github.com/repos/digitalygo/spynel/releases/latest"
+const defaultDownloadURL = "https://github.com/digitalygo/spynel/releases/download/v"
 const maxArchiveBytes = 512 << 20
 const maxChecksumBytes = 1 << 20
 

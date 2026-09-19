@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/agent0ai/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 var outboundDirective = regexp.MustCompile(`(?m)^[\t ]*\[Send (attachment|photo)\]\(<([^>\r\n]+)>\)[\t ]*(?:\r?\n|$)`)

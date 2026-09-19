@@ -14,8 +14,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/fsx"
 )
 
 const (

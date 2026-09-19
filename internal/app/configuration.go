@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/channel"
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/fsx"
-	"github.com/agent0ai/spynel/internal/harness"
-	"github.com/agent0ai/spynel/internal/theme"
+	"github.com/digitalygo/spynel/internal/channel"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/harness"
+	"github.com/digitalygo/spynel/internal/theme"
 )
 
 func (s *Service) Screen(id string) (core.Screen, error) {

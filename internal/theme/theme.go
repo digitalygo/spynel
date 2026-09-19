@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/agent0ai/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/fsx"
 	"gopkg.in/yaml.v3"
 )
 

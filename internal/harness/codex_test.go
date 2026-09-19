@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 func TestCodexPreservesMultipleAgentMessages(t *testing.T) {

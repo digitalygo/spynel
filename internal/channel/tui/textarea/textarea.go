@@ -11,7 +11,6 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/agent0ai/spynel/internal/channel/tui/textarea/memoization"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/key"
@@ -20,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/digitalygo/spynel/internal/channel/tui/textarea/memoization"
 	"github.com/rivo/uniseg"
 )
 

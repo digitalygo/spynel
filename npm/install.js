@@ -123,7 +123,7 @@ function validateExtractedTree(root) {
 async function install() {
   const target = current();
   const archive = `spynel_${version}_${target.os}_${target.arch}.${target.ext}`;
-  const base = process.env.SPYNEL_DOWNLOAD_BASE || `https://github.com/agent0ai/spynel/releases/download/v${version}`;
+  const base = process.env.SPYNEL_DOWNLOAD_BASE || `https://github.com/digitalygo/spynel/releases/download/v${version}`;
   const destination = path.join(vendor, "spynel");
   if (fs.existsSync(destination) && fs.existsSync(marker)) {
     try {

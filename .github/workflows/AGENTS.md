@@ -14,7 +14,7 @@
 - Preserve least-privilege permissions, OIDC trusted publishing, provenance, and the documented token-only bootstrap fallback.
 - Archives include the executable, target-matched sherpa-onnx and ONNX Runtime libraries, license notices, a packaged-command smoke pass, and bounded target evidence.
 
-- Before publishing, every native target tests startup/updater cleanup and the plain installer/uninstaller against a verified 0.12.1 baseline archive, including simultaneous running npm/GitHub installations and modeled authorization for a regular user with no writable PATH entry.
+- Before publishing, every native target tests startup/updater cleanup and the plain installer/uninstaller against a verified prior baseline archive, including simultaneous running npm/GitHub installations and modeled authorization for a regular user with no writable PATH entry. Releases after the first Digitalygo release (`v1.0.0`) download and checksum-verify the published `v1.0.0` archive and `checksums.txt` from `digitalygo/spynel` as that baseline; the `v1.0.0` release itself has no published predecessor, so each native target builds a synthetic `0.99.0` archive from the same source and uses it as the older baseline. Both the synthetic `0.99.0` first-release baseline and the published `v1.0.0` baseline use the standalone verifier's explicit modern/current-contract assertion mode because both share Digitalygo `v1.0.0`-lineage update semantics; the default historical assertion mode remains available only for legacy predecessor archives.
 
 - All four native targets also run the isolated npm multi-instance update test against the candidate archive, including real TUI terminals and a synthetic newer executable; this gate precedes asset/npm publication.
 

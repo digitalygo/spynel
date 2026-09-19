@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/agent0ai/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/config"
 	"go.mau.fi/whatsmeow"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"

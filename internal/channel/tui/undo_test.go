@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agent0ai/spynel/internal/core"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 func undoKey(t *testing.T, m *model, key tea.KeyType) {

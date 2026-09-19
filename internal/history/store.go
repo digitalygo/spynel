@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/fsx"
-	"github.com/agent0ai/spynel/internal/shortid"
+	"github.com/digitalygo/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/shortid"
 )
 
 const (

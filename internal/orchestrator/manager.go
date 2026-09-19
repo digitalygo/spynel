@@ -15,14 +15,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/agentdocs"
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/extensions"
-	"github.com/agent0ai/spynel/internal/fsx"
-	"github.com/agent0ai/spynel/internal/harness"
-	"github.com/agent0ai/spynel/internal/instructions"
-	"github.com/agent0ai/spynel/internal/shortid"
+	"github.com/digitalygo/spynel/internal/agentdocs"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/extensions"
+	"github.com/digitalygo/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/harness"
+	"github.com/digitalygo/spynel/internal/instructions"
+	"github.com/digitalygo/spynel/internal/shortid"
 )
 
 type Lease struct {

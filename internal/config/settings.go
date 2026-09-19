@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/agent0ai/spynel/internal/harness"
+	"github.com/digitalygo/spynel/internal/harness"
 )
 
 // Setting is the shared metadata used by command-based configuration and TUI

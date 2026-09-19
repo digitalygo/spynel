@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agent0ai/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 func TestConcurrentMessageIdentityDispatchesOnce(t *testing.T) {

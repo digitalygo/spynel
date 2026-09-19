@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agent0ai/spynel/internal/theme"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/digitalygo/spynel/internal/theme"
 )
 
 func TestLogicalLayoutPreservesHardBreaksAndWhitespace(t *testing.T) {

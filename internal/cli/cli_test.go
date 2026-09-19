@@ -17,17 +17,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/app"
-	"github.com/agent0ai/spynel/internal/channel"
-	"github.com/agent0ai/spynel/internal/channel/tui"
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/harness"
-	"github.com/agent0ai/spynel/internal/history"
-	"github.com/agent0ai/spynel/internal/instance"
-	"github.com/agent0ai/spynel/internal/localapi"
-	"github.com/agent0ai/spynel/internal/updater"
-	"github.com/agent0ai/spynel/internal/workspace"
+	"github.com/digitalygo/spynel/internal/app"
+	"github.com/digitalygo/spynel/internal/channel"
+	"github.com/digitalygo/spynel/internal/channel/tui"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/harness"
+	"github.com/digitalygo/spynel/internal/history"
+	"github.com/digitalygo/spynel/internal/instance"
+	"github.com/digitalygo/spynel/internal/localapi"
+	"github.com/digitalygo/spynel/internal/updater"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
 type heldCLIHarness struct {

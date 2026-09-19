@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/harness"
-	"github.com/agent0ai/spynel/internal/orchestrator"
-	"github.com/agent0ai/spynel/internal/workspace"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/harness"
+	"github.com/digitalygo/spynel/internal/orchestrator"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
 type jobControlHarness struct {

@@ -7,7 +7,7 @@ Spynel supports standalone script installation and the unscoped npm package on L
 Standalone installation needs POSIX `sh`, curl, tar, and sha256sum or shasum; it needs no Node.js, Go, or compiler:
 
 ```sh
-curl -LsSf https://spynel.agent-zero.ai/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/digitalygo/spynel/main/install.sh | sh
 spynel
 ```
 
@@ -20,7 +20,7 @@ The installer places its launcher on your existing PATH and verifies it before r
 To uninstall:
 
 ```sh
-curl -LsSf https://spynel.agent-zero.ai/uninstall.sh | sh
+curl -LsSf https://raw.githubusercontent.com/digitalygo/spynel/main/uninstall.sh | sh
 ```
 
 This stops the installations' processes, removes their startup registrations, and removes both the standalone GitHub installation and the current global npm installation when present. Workspace data and unrelated files are kept. A custom standalone installation uses the same `SPYNEL_INSTALL_DIR` during removal. Native cleanup requires release 0.12.4 or newer; the script obtains that helper independently of the installed version.
@@ -65,7 +65,7 @@ Standalone updates stage a complete verified bundle before switching the stable 
 The development helper can download a pinned Go toolchain into the ignored, disposable repository-level `.tmp-toolchains/` directory when Go is unavailable:
 
 ```bash
-git clone https://github.com/agent0ai/spynel.git
+git clone https://github.com/digitalygo/spynel.git
 cd spynel
 ./scripts/dev.sh build
 ```

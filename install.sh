@@ -1,5 +1,5 @@
 #!/bin/sh
-# Release bootstrap: curl -LsSf https://spynel.agent-zero.ai/install.sh | sh
+# Release bootstrap: curl -LsSf https://raw.githubusercontent.com/digitalygo/spynel/main/install.sh | sh
 # The verified native binary owns full bundle validation and atomic installation.
 set -eu
 
@@ -63,14 +63,14 @@ main() {
   version=${SPYNEL_VERSION:-}
   if [ -z "$version" ]; then
     echo 'Finding the latest Spynel release...' >&2
-    latest=$(curl -LsSf --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 10 --max-redirs 5 -o /dev/null -w '%{url_effective}' https://github.com/agent0ai/spynel/releases/latest)
+    latest=$(curl -LsSf --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 10 --max-redirs 5 -o /dev/null -w '%{url_effective}' https://github.com/digitalygo/spynel/releases/latest)
     version=${latest##*/v}
   fi
   version=${version#v}
   # Stable releases only; the native installer performs strict semantic validation.
   case "$version" in ''|*[!0-9.]*|.*|*.) echo 'Unable to select a stable Spynel release.' >&2; exit 1 ;; esac
   archive="spynel_${version}_${target_os}_${target_arch}.tar.gz"
-  base=${SPYNEL_DOWNLOAD_BASE:-"https://github.com/agent0ai/spynel/releases/download/v$version"}
+  base=${SPYNEL_DOWNLOAD_BASE:-"https://github.com/digitalygo/spynel/releases/download/v$version"}
   base=${base%/}
   echo "Downloading Spynel $version for $target_os/$target_arch..." >&2
   download "$base/$archive" "$stage/$archive" 536870912

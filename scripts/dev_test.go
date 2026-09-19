@@ -1,6 +1,8 @@
 package scripts
 
 import (
+	"bytes"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +60,117 @@ func TestDeveloperVerificationPaths(t *testing.T) {
 				t.Errorf("obsolete root build output ignore remains: %q", obsolete)
 			}
 		}
+	}
+}
+
+func TestCanonicalRepositoryCoordinates(t *testing.T) {
+	const ownerRepo = "digitalygo/spynel"
+	const canonical = "github.com/" + ownerRepo
+	// Assembled from parts so this sentinel never matches the test's own source.
+	const retired = "agent0ai" + "/spynel"
+
+	module, err := os.ReadFile(filepath.Join("..", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first := strings.SplitN(string(module), "\n", 2)[0]; first != "module "+canonical {
+		t.Errorf("go.mod must declare %q, got %q", "module "+canonical, first)
+	}
+
+	var drifted []string
+	for _, root := range []string{filepath.Join("..", "cmd"), filepath.Join("..", "internal"), "."} {
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if bytes.Contains(data, []byte(retired)) {
+				drifted = append(drifted, path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(drifted) != 0 {
+		t.Errorf("first-party Go sources must use %s instead of the retired upstream module: %v", canonical, drifted)
+	}
+
+	checks := []struct {
+		path        string
+		coordinates []string
+	}{
+		{filepath.Join("..", "install.sh"), []string{
+			"https://" + canonical + "/releases/latest",
+			"https://" + canonical + "/releases/download/v",
+			"https://raw.githubusercontent.com/" + ownerRepo + "/main/install.sh",
+		}},
+		{filepath.Join("..", "uninstall.sh"), []string{
+			"https://raw.githubusercontent.com/" + ownerRepo + "/main/install.sh",
+		}},
+		{filepath.Join("..", "internal", "updater", "github.go"), []string{
+			"https://api.github.com/repos/" + ownerRepo + "/releases/latest",
+			"https://" + canonical + "/releases/download/v",
+		}},
+		{filepath.Join("..", "npm", "install.js"), []string{
+			"https://" + canonical + "/releases/download/v",
+		}},
+		{filepath.Join("..", "npm", "prepare-release.js"), []string{
+			`const REPOSITORY = "` + ownerRepo + `"`,
+		}},
+		{filepath.Join("..", "package.json"), []string{
+			"git+https://" + canonical + ".git",
+			"https://" + canonical + "/issues",
+			"https://" + canonical + "#readme",
+		}},
+		{filepath.Join("..", "npm", "test.js"), []string{
+			"https://" + canonical + "/blob/",
+			"https://raw.githubusercontent.com/" + ownerRepo + "/",
+		}},
+		{filepath.Join("..", ".github", "workflows", "release.yml"), []string{
+			"spynel_1.0.0_",
+			"https://" + canonical + "/releases/download/v1.0.0/",
+			"spynel_0.99.0_",
+			"package-native.sh \"v0.99.0\"",
+			"\"$RELEASE_TAG\" = \"v1.0.0\"",
+			"--modern-baseline",
+		}},
+		{filepath.Join("..", "scripts", "test-standalone.py"), []string{
+			`b"https://raw.githubusercontent.com/` + ownerRepo + `/main/install.sh"`,
+		}},
+	}
+	for _, check := range checks {
+		data, err := os.ReadFile(check.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		for _, coordinate := range check.coordinates {
+			if !strings.Contains(content, coordinate) {
+				t.Errorf("%s must keep canonical coordinate %q", check.path, coordinate)
+			}
+		}
+		if strings.Contains(content, retired) {
+			t.Errorf("%s must not reference the retired upstream repository", check.path)
+		}
+	}
+
+	workflow, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(workflow), "--modern-baseline"); got != 2 {
+		t.Errorf("release workflow must pass --modern-baseline in both standalone branches, got %d", got)
+	}
+	if strings.Contains(string(workflow), "--synthetic-bootstrap") {
+		t.Errorf("release workflow must not reference the retired --synthetic-bootstrap flag")
 	}
 }
 

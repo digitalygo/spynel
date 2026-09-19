@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rivo/uniseg"
 
-	"github.com/agent0ai/spynel/internal/theme"
+	"github.com/digitalygo/spynel/internal/theme"
 )
 
 const sample = `# Release

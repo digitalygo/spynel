@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/fsx"
 )
 
 const (

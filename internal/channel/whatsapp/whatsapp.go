@@ -26,11 +26,11 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/agent0ai/spynel/internal/channel"
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
-	markdownfmt "github.com/agent0ai/spynel/internal/markdown"
-	"github.com/agent0ai/spynel/internal/media"
+	"github.com/digitalygo/spynel/internal/channel"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
+	markdownfmt "github.com/digitalygo/spynel/internal/markdown"
+	"github.com/digitalygo/spynel/internal/media"
 )
 
 type Client struct {

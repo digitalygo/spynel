@@ -7,9 +7,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/markdown"
 	charmansi "github.com/charmbracelet/x/ansi"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/markdown"
 )
 
 func TestRuntimeWriterCapturesLinesAndPublishesLatestCounts(t *testing.T) {

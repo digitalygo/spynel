@@ -3,13 +3,13 @@ package tui
 import (
 	"strings"
 
-	"github.com/agent0ai/spynel/internal/channel/tui/textarea"
-	"github.com/agent0ai/spynel/internal/core"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/cursor"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/digitalygo/spynel/internal/channel/tui/textarea"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 type formHit struct{ index, row, width, valueX int }

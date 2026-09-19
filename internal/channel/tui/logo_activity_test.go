@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/app"
-	"github.com/agent0ai/spynel/internal/core"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/digitalygo/spynel/internal/app"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 func TestLogoAnimatesGlobalJobsWhileDisplayedConversationIsIdle(t *testing.T) {

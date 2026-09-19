@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/startup"
-	"github.com/agent0ai/spynel/internal/updater"
+	"github.com/digitalygo/spynel/internal/startup"
+	"github.com/digitalygo/spynel/internal/updater"
 )
 
 func runUninstallBundles(args []string) error {

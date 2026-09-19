@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/fsx"
 )
 
 // ProcessRegistration identifies a live server/TUI, including secondary TUIs

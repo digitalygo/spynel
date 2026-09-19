@@ -5,6 +5,7 @@
 .tmp*/
 /.reviewer-probe/
 /npm/vendor/
+substrate/traces/status/
 
 # Go test/build artifacts
 *.test

@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/app"
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/history"
-	"github.com/agent0ai/spynel/internal/instance"
-	"github.com/agent0ai/spynel/internal/shortid"
+	"github.com/digitalygo/spynel/internal/app"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/history"
+	"github.com/digitalygo/spynel/internal/instance"
+	"github.com/digitalygo/spynel/internal/shortid"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

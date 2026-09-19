@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/agent0ai/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/fsx"
 )
 
 type Origin struct{ Channel, Conversation string }

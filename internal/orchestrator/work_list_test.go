@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/extensions"
-	"github.com/agent0ai/spynel/internal/workspace"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/extensions"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
 func TestWorkflowItemsUsesFolderStateAndDoesNotFollowDocumentSymlinks(t *testing.T) {

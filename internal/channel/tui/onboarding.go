@@ -4,15 +4,15 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/agent0ai/spynel/internal/channel/tui/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/digitalygo/spynel/internal/channel/tui/textarea"
 	"github.com/muesli/termenv"
 
-	"github.com/agent0ai/spynel/internal/channel"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/theme"
+	"github.com/digitalygo/spynel/internal/channel"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/theme"
 )
 
 // WorkspaceChoice is the explicit result of resolving an uninitialized launch

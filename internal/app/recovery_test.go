@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/channel"
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/harness"
-	"github.com/agent0ai/spynel/internal/history"
-	"github.com/agent0ai/spynel/internal/orchestrator"
-	"github.com/agent0ai/spynel/internal/workspace"
+	"github.com/digitalygo/spynel/internal/channel"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/harness"
+	"github.com/digitalygo/spynel/internal/history"
+	"github.com/digitalygo/spynel/internal/orchestrator"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
 func newRecoveryTestService(t *testing.T) (*Service, *serviceHarness, config.Config) {

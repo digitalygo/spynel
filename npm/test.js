@@ -45,8 +45,8 @@ assert.strictEqual(pkg.name, "spynel");
 assert.strictEqual(pkg.description, "A non-AI orchestration layer connecting one human to many coding agents");
 assert.strictEqual(pkg.bin.spynel, "npm/bin/spynel.js");
 assert.strictEqual(pkg.publishConfig.registry, "https://registry.npmjs.org");
-assert.strictEqual(pkg.repository.url, "git+https://github.com/agent0ai/spynel.git");
-assert(fs.readFileSync(path.join(__dirname, "install.js"), "utf8").includes("https://github.com/agent0ai/spynel/releases/download/"));
+assert.strictEqual(pkg.repository.url, "git+https://github.com/digitalygo/spynel.git");
+assert(fs.readFileSync(path.join(__dirname, "install.js"), "utf8").includes("https://github.com/digitalygo/spynel/releases/download/"));
 assert.deepStrictEqual(releaseMetadata("v1.2.3-beta.1", "true"), {
   tag: "v1.2.3-beta.1",
   version: "1.2.3-beta.1",
@@ -59,9 +59,9 @@ assert.strictEqual(
     "![Logo](assets/logo.png) [Guide](docs/guide.md) [Section](#section) <img src=\"./assets/demo image.png\">\n",
     "v1.2.3",
   ),
-  "![Logo](https://raw.githubusercontent.com/agent0ai/spynel/v1.2.3/assets/logo.png) " +
-    "[Guide](https://github.com/agent0ai/spynel/blob/v1.2.3/docs/guide.md) [Section](#section) " +
-    "<img src=\"https://raw.githubusercontent.com/agent0ai/spynel/v1.2.3/assets/demo%20image.png\">\n",
+  "![Logo](https://raw.githubusercontent.com/digitalygo/spynel/v1.2.3/assets/logo.png) " +
+    "[Guide](https://github.com/digitalygo/spynel/blob/v1.2.3/docs/guide.md) [Section](#section) " +
+    "<img src=\"https://raw.githubusercontent.com/digitalygo/spynel/v1.2.3/assets/demo%20image.png\">\n",
 );
 const prepared = fs.mkdtempSync(path.join(__dirname, ".test-release-"));
 try {
@@ -71,7 +71,7 @@ try {
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(prepared, "package.json"), "utf8")).version, "2.0.0");
   assert.strictEqual(
     fs.readFileSync(path.join(prepared, "README.md"), "utf8"),
-    "[Docs](https://github.com/agent0ai/spynel/blob/v2.0.0/docs/README.md)\n",
+    "[Docs](https://github.com/digitalygo/spynel/blob/v2.0.0/docs/README.md)\n",
   );
 } finally {
   fs.rmSync(prepared, { recursive: true, force: true });

@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agent0ai/spynel/internal/agentdocs"
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/extensions"
-	"github.com/agent0ai/spynel/internal/instructions"
-	"github.com/agent0ai/spynel/internal/workspace"
+	"github.com/digitalygo/spynel/internal/agentdocs"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/extensions"
+	"github.com/digitalygo/spynel/internal/instructions"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
 func TestEveryOrchestrationPhaseGetsOneCallableDocsGuidance(t *testing.T) {

@@ -32,12 +32,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/agent0ai/spynel.git"
+    "url": "git+https://github.com/digitalygo/spynel.git"
   },
   "bugs": {
-    "url": "https://github.com/agent0ai/spynel/issues"
+    "url": "https://github.com/digitalygo/spynel/issues"
   },
-  "homepage": "https://github.com/agent0ai/spynel#readme",
+  "homepage": "https://github.com/digitalygo/spynel#readme",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"

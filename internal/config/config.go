@@ -12,8 +12,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/agent0ai/spynel/internal/fsx"
-	"github.com/agent0ai/spynel/internal/harness"
+	"github.com/digitalygo/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/harness"
 	"gopkg.in/yaml.v3"
 )
 

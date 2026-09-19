@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/history"
+	"github.com/digitalygo/spynel/internal/history"
 )
 
 func TestWatchTaskNotificationsRetriesPartialRecoveryLine(t *testing.T) {

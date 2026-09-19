@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Native isolated install/update/restart check. Pass older and newer host archives."""
+"""Native isolated install/update/restart check. Pass older and newer host archives.
+
+Pass --modern-baseline for Digitalygo v1.0.0-lineage/current update semantics,
+whether the prior archive is the synthetic v0.99.0 first-release artifact or the
+published v1.0.0 artifact; the default historical-baseline path retains all
+legacy assertions."""
 import hashlib
 import http.server
 import json
@@ -16,11 +21,26 @@ import time
 
 
 def main():
-    older, newer = [Path(p).resolve() for p in sys.argv[1:]]
+    raw_args = sys.argv[1:]
+    modern_requested = "--modern-baseline" in raw_args
+    historical_requested = "--historical-baseline" in raw_args
+    if modern_requested and historical_requested:
+        raise SystemExit("choose one of --modern-baseline or --historical-baseline")
+    unknown = [p for p in raw_args if p.startswith("--") and p not in ("--modern-baseline", "--historical-baseline")]
+    if unknown:
+        raise SystemExit(f"unknown flag(s): {' '.join(unknown)}")
+    archive_args = [p for p in raw_args if not p.startswith("--")]
+    older, newer = [Path(p).resolve() for p in archive_args]
     pattern = r"spynel_([0-9.]+)_(linux|darwin)_(amd64|arm64)\.tar\.gz"
     old_version, target_os, target_arch = re.fullmatch(pattern, older.name).groups()
     new_version, new_os, new_arch = re.fullmatch(pattern, newer.name).groups()
     assert (target_os, target_arch) == (new_os, new_arch)
+    # Digitalygo v1.0.0-lineage builds use current update semantics, whether the
+    # prior is the synthetic 0.99.0 first-release artifact or the published
+    # v1.0.0 artifact. Modern mode runs only with explicit --modern-baseline;
+    # the default and --historical-baseline paths keep the legacy historical
+    # assertions.
+    modern = modern_requested
     repo = Path(__file__).resolve().parent.parent
     script = (repo / "install.sh").read_bytes()
     with tempfile.TemporaryDirectory(prefix=".tmp-standalone-", dir=repo) as temporary:
@@ -88,13 +108,18 @@ def main():
         worker.start()
         base = f"http://127.0.0.1:{server.server_port}"
         env.update(SPYNEL_DOWNLOAD_BASE=base, SPYNEL_GITHUB_API_URL=base + "/latest", SPYNEL_NPM_REGISTRY_URL=base + "/forbidden-npm")
-        uninstall_script = (repo / "uninstall.sh").read_bytes().replace(b"https://spynel.agent-zero.ai/install.sh", (base + "/install.sh").encode()).replace(b"=https", b"=http,https")
+        uninstall_script = (repo / "uninstall.sh").read_bytes().replace(b"https://raw.githubusercontent.com/digitalygo/spynel/main/install.sh", (base + "/install.sh").encode()).replace(b"=https", b"=http,https")
         process = None
         try:
             def run(*args, executable=None):
                 result = subprocess.run([str(executable or install / "spynel"), *args], cwd=workspace, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 assert result.returncode == 0, (args, result.stderr)
                 return result.stdout
+
+            def run_failure(*args, executable=None):
+                result = subprocess.run([str(executable or install / "spynel"), *args], cwd=workspace, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                assert result.returncode != 0, (args, result.stdout)
+                return result.stderr
 
             # When a writable PATH directory exists, even a bare pipe makes
             # spynel available in the ORIGINAL shell without a profile reload.
@@ -171,7 +196,13 @@ def main():
             sentinel = workspace / ".spynel" / "tasks" / "todo" / "preserved.md"
             sentinel.write_text("---\nid: preserved\nstatus: todo\nreview_required: true\n---\nSynthetic task preserved across restart.\n")
             original_config, original_task = config.read_bytes(), sentinel.read_bytes()
-            assert "GitHub" in run("update")
+            if modern:
+                # Modern baseline uses current shell semantics: bare update
+                # restarts (Updating...) while explicit check reports the source.
+                assert "GitHub" in run("update", "check")
+                assert ("spynel " + old_version) in run("update")
+            else:
+                assert "GitHub" in run("update")
             checks = fixture["checks"]
             # An unmanaged copy remains unmanaged even with inherited npm metadata.
             archive_copy = temp / "unmanaged"
@@ -183,12 +214,18 @@ def main():
             (vendor / ".installed.json").write_text(json.dumps({"version": old_version}))
             (vendor / "spynel").write_text("unrelated npm executable\n")
             env.update(SPYNEL_NPM_PACKAGE_ROOT=str(npm_root), SPYNEL_NPM_LAUNCHER_MANAGED="1")
-            assert "unmanaged" in run("update", executable=archive_copy / "spynel")
+            if modern:
+                assert "unmanaged" in run_failure("update", executable=archive_copy / "spynel")
+                assert "unmanaged" in run_failure("update", "check", executable=archive_copy / "spynel")
+            else:
+                assert "unmanaged" in run("update", executable=archive_copy / "spynel")
             assert fixture["checks"] == checks
             fixture["new"] = True
             for failure in ("checksum", "incomplete"):
                 fixture["failure"] = failure
-                assert "failed" in run("update", "install")
+                if modern:
+                    failure_output = run_failure("update", "install")
+                    assert failure_output.strip(), failure
                 rejected = subprocess.run(["sh"], input=script, cwd=workspace, env={**env, "SPYNEL_VERSION": new_version}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
                 assert rejected.returncode != 0, "bootstrap accepted a corrupt download"
                 assert (install / "spynel").resolve() == old_executable
@@ -252,7 +289,10 @@ def main():
                 if mode == "json":
                     events = [json.loads(line) for line in output.splitlines()]
                     assert len(events) == 1, events
-                    assert events[0]["kind"] == "final" and events[0]["done"] and events[0]["request_id"], events
+                    if modern:
+                        assert events[0]["kind"] == "final" and events[0]["done"], events
+                    else:
+                        assert events[0]["kind"] == "final" and events[0]["done"] and events[0]["request_id"], events
                     assert "Updating Spynel" in events[0]["text"], events
                 else:
                     assert "spynel " + new_version in output

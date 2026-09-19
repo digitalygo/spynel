@@ -15,20 +15,20 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/agent0ai/spynel/internal/channel/tui/textarea"
 	bubblespinner "github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/digitalygo/spynel/internal/channel/tui/textarea"
 	"github.com/muesli/termenv"
 	"github.com/rivo/uniseg"
 
-	"github.com/agent0ai/spynel/internal/channel"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/history"
-	markdownfmt "github.com/agent0ai/spynel/internal/markdown"
-	"github.com/agent0ai/spynel/internal/theme"
+	"github.com/digitalygo/spynel/internal/channel"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/history"
+	markdownfmt "github.com/digitalygo/spynel/internal/markdown"
+	"github.com/digitalygo/spynel/internal/theme"
 )
 
 type uiEvent struct {

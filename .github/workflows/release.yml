@@ -97,11 +97,18 @@ jobs:
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p .tmp-artifacts/standalone-prior
-          archive="spynel_0.12.1_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
-          curl -LfS --retry 3 -o ".tmp-artifacts/standalone-prior/$archive" "https://github.com/agent0ai/spynel/releases/download/v0.12.1/$archive"
-          curl -LfS --retry 3 -o .tmp-artifacts/standalone-prior/checksums.txt https://github.com/agent0ai/spynel/releases/download/v0.12.1/checksums.txt
-          (cd .tmp-artifacts/standalone-prior && grep "  $archive$" checksums.txt | shasum -a 256 -c -)
-          python3 scripts/test-standalone.py ".tmp-artifacts/standalone-prior/$archive" "release/spynel_${RELEASE_TAG#v}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+          if [ "$RELEASE_TAG" = "v1.0.0" ]; then
+            ./scripts/package-native.sh "v0.99.0" "$TARGET_OS" "$TARGET_ARCH" .tmp-artifacts/standalone-prior
+            prior_archive=".tmp-artifacts/standalone-prior/spynel_0.99.0_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+            python3 scripts/test-standalone.py "$prior_archive" "release/spynel_${RELEASE_TAG#v}_${TARGET_OS}_${TARGET_ARCH}.tar.gz" --modern-baseline
+          else
+            archive="spynel_1.0.0_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+            curl -LfS --retry 3 -o ".tmp-artifacts/standalone-prior/$archive" "https://github.com/digitalygo/spynel/releases/download/v1.0.0/$archive"
+            curl -LfS --retry 3 -o .tmp-artifacts/standalone-prior/checksums.txt https://github.com/digitalygo/spynel/releases/download/v1.0.0/checksums.txt
+            (cd .tmp-artifacts/standalone-prior && grep "  $archive$" checksums.txt | shasum -a 256 -c -)
+            prior_archive=".tmp-artifacts/standalone-prior/$archive"
+            python3 scripts/test-standalone.py "$prior_archive" "release/spynel_${RELEASE_TAG#v}_${TARGET_OS}_${TARGET_ARCH}.tar.gz" --modern-baseline
+          fi
 
       - uses: actions/setup-node@v6
         with:

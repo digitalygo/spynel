@@ -10,9 +10,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/orchestrator"
-	"github.com/agent0ai/spynel/internal/shortid"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/orchestrator"
+	"github.com/digitalygo/spynel/internal/shortid"
 )
 
 const (

@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/agent0ai/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/config"
 )
 
 const (

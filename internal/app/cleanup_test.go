@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/history"
-	"github.com/agent0ai/spynel/internal/workspace"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/history"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
 func TestCleanupUsesLastUpdateStrictCutoffAndArchivesOnlyTerminalTasks(t *testing.T) {

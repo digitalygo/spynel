@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/core"
 )
 
 // Managed describes one hot-reloadable transport without coupling the shared

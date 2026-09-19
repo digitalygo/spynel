@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/core"
-	"github.com/agent0ai/spynel/internal/fsx"
+	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/fsx"
 )
 
 // Claude is a lightweight adapter around Claude Code print mode. It uses

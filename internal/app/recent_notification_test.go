@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/history"
-	"github.com/agent0ai/spynel/internal/workspace"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/history"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
 type recentNotificationRouter struct {

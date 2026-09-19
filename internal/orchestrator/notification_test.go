@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/workspace"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
 func TestNotificationFrontMatterPreservesUnknownFieldsAndValidatesOrigin(t *testing.T) {

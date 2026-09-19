@@ -75,7 +75,7 @@ Spynel has three pillars:
 For macOS and Linux:
 
 ```sh
-curl -LsSf https://spynel.agent-zero.ai/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/digitalygo/spynel/main/install.sh | sh
 spynel
 ```
 
@@ -112,7 +112,7 @@ See the [documentation index](docs/README.md) for the complete guide map.
 ## Uninstall
 
 ```sh
-curl -LsSf https://spynel.agent-zero.ai/uninstall.sh | sh
+curl -LsSf https://raw.githubusercontent.com/digitalygo/spynel/main/uninstall.sh | sh
 ```
 
 Your workspace data is kept.

@@ -1,4 +1,4 @@
-module github.com/agent0ai/spynel
+module github.com/digitalygo/spynel
 
 go 1.25.0
 

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agent0ai/spynel/internal/config"
-	"github.com/agent0ai/spynel/internal/harness"
-	"github.com/agent0ai/spynel/internal/theme"
+	"github.com/digitalygo/spynel/internal/config"
+	"github.com/digitalygo/spynel/internal/harness"
+	"github.com/digitalygo/spynel/internal/theme"
 )
 
 func TestInitCreatesDocumentedWorkspace(t *testing.T) {

@@ -20,13 +20,13 @@ The package must exist before npm permits a trusted publisher to be configured. 
 1. Create or use the npm account that will own the unscoped `spynel` package and enable 2FA.
 2. Create a granular npm access token that can publish new public packages and bypasses interactive 2FA for automation.
 3. Save it as the GitHub Actions repository secret `NPM_TOKEN` and publish the first matching GitHub Release.
-4. In the new package's npm settings, add a GitHub Actions trusted publisher with organization/user `agent0ai`, repository `spynel`, workflow filename `release.yml`, and `npm publish` permission.
+4. In the new package's npm settings, add a GitHub Actions trusted publisher with organization/user `digitalygo`, repository `spynel`, workflow filename `release.yml`, and `npm publish` permission.
 5. Remove `NPM_TOKEN` after one successful OIDC publication. The workflow passes the secret only as a fallback for the bootstrap release; an empty value is valid once trusted publishing is active.
 
 The same setup can be created with a current npm CLI after the first package version exists:
 
 ```bash
-npm trust github spynel --repo agent0ai/spynel --file release.yml --allow-publish
+npm trust github spynel --repo digitalygo/spynel --file release.yml --allow-publish
 ```
 
 No GitHub personal access token is required for same-repository release assets: the job-scoped `GITHUB_TOKEN` receives `contents: write`. A separate fine-grained token is needed only if future workflow steps push metadata into another repository such as Homebrew or Scoop.
@@ -35,7 +35,9 @@ See npm's official [Trusted Publishing](https://docs.npmjs.com/trusted-publisher
 
 ## Release procedure
 
-For changes to cross-platform process lifecycle, first run the release workflow manually on the intended commit with the proposed version tag. This runs the same verification and four native jobs, including live npm replacement across workspaces and TUI terminals, but cannot publish a GitHub Release or npm package. Confirm that every native job passed for that exact commit before creating its release tag.
+For changes to cross-platform process lifecycle, first run the release workflow manually on the intended commit with the proposed version tag. A manual dispatch validates and builds that commit through the same verification and four native jobs, including live npm replacement across workspaces and TUI terminals, but it never publishes: only a published GitHub Release enters the publication job. Confirm that every native job passed for that exact commit before creating its release tag.
+
+Every native job also tests the plain installer, uninstaller, and live update path against a prior baseline archive. Releases after `v1.0.0` download and checksum-verify the published `v1.0.0` archive and `checksums.txt` from `digitalygo/spynel` before using them as the older baseline. The `v1.0.0` release itself has no published predecessor, so each native job builds a synthetic `0.99.0` bootstrap archive from the same source and uses it as the older baseline. Both the synthetic `0.99.0` first-release baseline and the published `v1.0.0` baseline use the standalone verifier's explicit modern/current-contract assertion mode because both share Digitalygo `v1.0.0`-lineage update semantics; the default historical assertion mode remains available only for legacy predecessor archives.
 
 Create a GitHub Release with a `v`-prefixed semantic version tag, for example `v0.2.1`. Mark a version such as `v0.3.0-beta.1` as a GitHub prerelease. Publishing the release starts the workflow; creating or editing a draft does not. The committed `package.json` uses `0.0.0-development` because npm requires a version field; both verification and publication replace it with the tag-derived version in their isolated checkouts.
 
@@ -57,6 +59,6 @@ Extract the host archive and execute `spynel --version` with its companion libra
 
 ## Standalone bootstrap
 
-The root `install.sh` uses the same native archives and `checksums.txt` as npm, preserving the complete runtime and license layout. The README uses the plain `curl -LsSf https://spynel.agent-zero.ai/install.sh | sh` command followed immediately by `spynel`. Keep shell configuration details out of that command. Public `uninstall.sh` shares the bootstrap and requires the `uninstall-bundles` helper introduced in 0.12.4. Publish that helper before updating the public scripts. Public URL routing is managed separately; checking in the script does not make that URL live. The first compatible release, 0.12.0, includes the native `install-bundle` entry point and GitHub updater. Older published bundles cannot acquire this behavior just by downloading the new shell script. Do not claim the one-liner works against an older release.
+The root `install.sh` uses the same native archives and `checksums.txt` as npm, preserving the complete runtime and license layout. The README uses the plain `curl -LsSf https://raw.githubusercontent.com/digitalygo/spynel/main/install.sh | sh` command followed immediately by `spynel`. Keep shell configuration details out of that command. Public `uninstall.sh` shares the bootstrap and requires the `uninstall-bundles` helper introduced in 0.12.4. Publish that helper before updating the public scripts. The raw GitHub URL serves the committed scripts directly from the repository's default branch; no separately managed domain routing is involved. The first compatible release, 0.12.0, includes the native `install-bundle` entry point and GitHub updater. Older published bundles cannot acquire this behavior just by downloading the new shell script. Do not claim the one-liner works against an older release.
 
 Before publishing that first release, build two isolated stable candidate versions with `scripts/package-native.sh`, put their checksums beside each archive, and run `python3 scripts/test-standalone.py <older-archive> <newer-archive>`. This starts only local release fixtures and a synthetic workspace with an unavailable harness, tests piped bootstrap and failed-download preservation, then exercises the real primary update/restart path. Native macOS verification requires running the same test with macOS candidates on a Mac; a Linux result does not establish that boundary.
