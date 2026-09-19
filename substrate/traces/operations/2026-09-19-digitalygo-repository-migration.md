@@ -112,3 +112,32 @@ The repository migration deliberately kept the unscoped npm name to limit its ch
 - Confirmed that no credential value appears in any changed file.
 - Ran the repository DOX coverage gate on the changed contracts.
 - Ran `git diff --check` and verified whitespace, heading, and list consistency in the changed files.
+
+## Update 2026-09-19: v1.0.0 publication
+
+### Summary of changes
+
+The scoped package migration was committed as `d13e919` and published in GitHub Release `v1.0.0`. The release contains four native archives and `checksums.txt`; npm accepted and published `@digitalygo/spynel@1.0.0` with signed provenance and the `latest` distribution tag.
+
+### Technical reasoning
+
+The first release attempt targeted the earlier unscoped-package commit and failed during a flaky verification test before building assets. That empty release and tag were removed. After the scoped migration passed local quality and security gates, a manual dispatch on `d13e919` passed all verification and native jobs. The release was then recreated at the same version and completed every publish job.
+
+A granular npm token was used only for the bootstrap publication. npm accepted package publication but rejected creation of the Trusted Publisher because bypass-2FA tokens may no longer perform package trust configuration. The repository secret was removed after publication. Trusted Publishing must therefore be configured through an npm session authenticated with interactive 2FA before the next release.
+
+### Impact assessment
+
+- GitHub Release `v1.0.0` points to `d13e919d0a12fe9fd70e74294d49b828e3efd4ef`.
+- Native assets exist for Linux amd64 and arm64 plus macOS amd64 and arm64.
+- npm `latest` resolves to `@digitalygo/spynel@1.0.0` and installs the `spynel` command.
+- Future release jobs currently have no `NPM_TOKEN` fallback. They require the npm Trusted Publisher for `digitalygo/spynel` and `.github/workflows/release.yml` to be configured first.
+- The bootstrap token value is not recorded anywhere in the repository or operation trace and should be revoked or rotated through npm account settings because it was shared through an interactive channel.
+
+### Validation steps
+
+- Manual workflow dispatch `35449337641` passed verify and all four native build jobs for commit `d13e919`.
+- Release workflow `35449688043` passed verify, all four native jobs, GitHub asset publication, npm publication, and provenance generation.
+- GitHub Release inspection confirmed `checksums.txt` plus all four supported archives.
+- npm registry polling confirmed package name, version `1.0.0`, `latest` tag, repository coordinate, and `spynel` bin mapping.
+- A clean prefix installation of `@digitalygo/spynel@1.0.0` downloaded the native runtime and returned `spynel 1.0.0`.
+- The GitHub Actions `NPM_TOKEN` secret was deleted after the successful bootstrap publication.
