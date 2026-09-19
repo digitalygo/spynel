@@ -262,7 +262,7 @@ func TestNPMEnvironmentCannotClaimUnrelatedExecutable(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "npm", "vendor"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"spynel","version":"1.2.0"}`), 0600)
+	_ = os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"@digitalygo/spynel","version":"1.2.0"}`), 0600)
 	_ = os.WriteFile(filepath.Join(root, "npm", "vendor", ".installed.json"), []byte(`{"version":"1.2.0"}`), 0600)
 	_ = os.WriteFile(filepath.Join(root, "npm", "vendor", "spynel"), []byte("unrelated"), 0700)
 	t.Setenv("SPYNEL_NPM_PACKAGE_ROOT", root)

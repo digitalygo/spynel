@@ -45,12 +45,14 @@ func (m *Manager) Uninstall(ctx context.Context, removeStartup func() error) err
 	if resolved, err := filepath.EvalSymlinks(home); err == nil && resolved == root {
 		return errors.New("refusing to uninstall the home directory")
 	}
+	npmPrefix := ""
 	if m.InstallRoot != "" {
 		m.InstallRoot = root
 	} else {
 		m.PackageRoot = root
-		modules := filepath.Dir(root)
-		if filepath.Base(modules) != "node_modules" || filepath.Base(filepath.Dir(modules)) != "lib" {
+		var ok bool
+		npmPrefix, ok = npmPackagePrefix(root)
+		if !ok {
 			return errors.New("unsupported global npm installation layout")
 		}
 	}
@@ -76,8 +78,7 @@ func (m *Manager) Uninstall(ctx context.Context, removeStartup func() error) err
 	if m.InstallRoot == "" {
 		// npm owns its package and launcher links. Pin the prefix rather than
 		// allowing another npm configuration to select a different installation.
-		modules := filepath.Dir(root)
-		command := exec.CommandContext(ctx, "npm", "uninstall", "--global", "--prefix", filepath.Dir(filepath.Dir(modules)), "spynel")
+		command := exec.CommandContext(ctx, "npm", "uninstall", "--global", "--prefix", npmPrefix, NPMPackageName)
 		var output limitedOutput
 		command.Stdout, command.Stderr = &output, &output
 		if err := command.Run(); err != nil {
@@ -133,7 +134,7 @@ func uninstallNPMRoot(root string) bool {
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, 65537))
 	var metadata packageMetadata
-	return err == nil && len(data) <= 65536 && json.Unmarshal(data, &metadata) == nil && metadata.Name == "spynel"
+	return err == nil && len(data) <= 65536 && json.Unmarshal(data, &metadata) == nil && metadata.Name == NPMPackageName
 }
 
 func installationLink(path, root string) bool {

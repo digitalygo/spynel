@@ -82,7 +82,7 @@ spynel
 Or use npm (Node.js 18+):
 
 ```bash
-npm install -g spynel
+npm install -g @digitalygo/spynel
 spynel
 ```
 

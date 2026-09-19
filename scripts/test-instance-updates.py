@@ -23,7 +23,7 @@ def main():
     archive = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix=".tmp-instance-updates-", dir=repo) as temporary:
         temp = Path(temporary)
-        package = temp / "prefix" / "lib" / "node_modules" / "spynel"
+        package = temp / "prefix" / "lib" / "node_modules" / "@digitalygo" / "spynel"
         vendor = package / "npm" / "vendor"
         vendor.mkdir(parents=True)
         with tarfile.open(archive) as bundle:
@@ -36,14 +36,14 @@ def main():
             target = package / "npm" / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(repo / "npm" / name, target)
-        (package / "package.json").write_text(json.dumps({"name": "spynel", "version": version}))
+        (package / "package.json").write_text(json.dumps({"name": "@digitalygo/spynel", "version": version}))
         (vendor / ".installed.json").write_text(json.dumps({"version": version}))
         replacement = temp / "replacement"
         shutil.copytree(package, replacement)
         updated = "9.9.9"
         build_env = {**os.environ, "CGO_LDFLAGS_ALLOW": "^-Wl,-rpath,@loader_path/lib$"}
         subprocess.run([os.environ.get("SPYNEL_GO_BINARY", "go"), "build", "-trimpath", "-ldflags=-s -w -X main.version=" + updated, "-o", str(replacement / "npm" / "vendor" / "spynel"), "./cmd/spynel"], cwd=repo, env=build_env, check=True, timeout=180)
-        (replacement / "package.json").write_text(json.dumps({"name": "spynel", "version": updated}))
+        (replacement / "package.json").write_text(json.dumps({"name": "@digitalygo/spynel", "version": updated}))
         (replacement / "npm" / "vendor" / ".installed.json").write_text(json.dumps({"version": updated}))
         tools = temp / "tools"
         tools.mkdir()
@@ -52,7 +52,7 @@ def main():
 import json, os, pathlib, shutil, sys
 package = pathlib.Path(os.environ["INSTANCE_TEST_PACKAGE"])
 if sys.argv[1:] == ["root", "--global"]:
-    print(package.parent)
+    print(package.parent.parent)
     sys.exit(0)
 assert sys.argv[1] == "update", sys.argv
 with open(os.environ["INSTANCE_TEST_CALLS"], "a") as log:

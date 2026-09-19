@@ -10,7 +10,7 @@ const { once } = require("events");
 const { resolve } = require("./platform");
 const { install, validateArchiveEntries, validateExtractedTree } = require("./install");
 const { prepareRelease, releaseMetadata, rewriteReadme } = require("./prepare-release");
-const { STARTUP_PROMPT_TIMEOUT_MS, checkForUpdate, compareVersions, promptForStartupUpdate, shouldCheckAtStartup } = require("./update");
+const { STARTUP_PROMPT_TIMEOUT_MS, checkForUpdate, compareVersions, npmInvocation, promptForStartupUpdate, shouldCheckAtStartup } = require("./update");
 const { createLaunchEnvironment } = require("./bin/spynel");
 const pkg = require("../package.json");
 
@@ -41,12 +41,14 @@ assert.throws(() => resolve("win32", "x64"), /does not currently support Windows
 assert.throws(() => resolve("win32", "arm64"), /does not currently support Windows/);
 assert.throws(() => resolve("freebsd", "x64"), /does not publish/);
 
-assert.strictEqual(pkg.name, "spynel");
+assert.strictEqual(pkg.name, "@digitalygo/spynel");
 assert.strictEqual(pkg.description, "A non-AI orchestration layer connecting one human to many coding agents");
 assert.strictEqual(pkg.bin.spynel, "npm/bin/spynel.js");
+assert.strictEqual(pkg.publishConfig.access, "public");
 assert.strictEqual(pkg.publishConfig.registry, "https://registry.npmjs.org");
 assert.strictEqual(pkg.repository.url, "git+https://github.com/digitalygo/spynel.git");
 assert(fs.readFileSync(path.join(__dirname, "install.js"), "utf8").includes("https://github.com/digitalygo/spynel/releases/download/"));
+assert(fs.readFileSync(path.join(__dirname, "update.js"), "utf8").includes("https://registry.npmjs.org/@digitalygo%2Fspynel/latest"));
 assert.deepStrictEqual(releaseMetadata("v1.2.3-beta.1", "true"), {
   tag: "v1.2.3-beta.1",
   version: "1.2.3-beta.1",
@@ -65,7 +67,7 @@ assert.strictEqual(
 );
 const prepared = fs.mkdtempSync(path.join(__dirname, ".test-release-"));
 try {
-  fs.writeFileSync(path.join(prepared, "package.json"), '{"name":"spynel","version":"0.0.0-development"}\n');
+  fs.writeFileSync(path.join(prepared, "package.json"), '{"name":"@digitalygo/spynel","version":"0.0.0-development"}\n');
   fs.writeFileSync(path.join(prepared, "README.md"), "[Docs](docs/README.md)\n");
   assert.strictEqual(prepareRelease(prepared, "v2.0.0", "false").version, "2.0.0");
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(prepared, "package.json"), "utf8")).version, "2.0.0");
@@ -184,12 +186,12 @@ const fs = require("fs");
 if (process.argv[2] === "root") process.exit(1);
 fs.appendFileSync(process.env.UPDATE_TEST_LOG, "npm\\n");
 if (process.env.UPDATE_TEST_FAIL === "npm") process.exit(1);
-fs.writeFileSync("package.json", JSON.stringify({name: "spynel", version: "2.0.0"}));
+fs.writeFileSync("package.json", JSON.stringify({name: "@digitalygo/spynel", version: "2.0.0"}));
 `, { mode: 0o700 });
     for (const failure of ["", "check-restartable", "npm", "restart-instances", "current"]) {
       const log = path.join(directory, "calls");
       fs.writeFileSync(log, "");
-      fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify({ name: "spynel", version: "1.0.0" }));
+      fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify({ name: "@digitalygo/spynel", version: "1.0.0" }));
       const result = spawnSync(process.execPath, [path.join(directory, "npm", "bin", "spynel.js"), "update"], {
         encoding: "utf8", timeout: 5000,
         env: { ...process.env, PATH: path.join(directory, "tools") + path.delimiter + process.env.PATH, UPDATE_TEST_LOG: log, UPDATE_TEST_FAIL: failure, UPDATE_TEST_CURRENT: failure === "current" ? "1" : "0" }
@@ -205,7 +207,50 @@ fs.writeFileSync("package.json", JSON.stringify({name: "spynel", version: "2.0.0
   }
 }
 
+function checkNPMInvocation() {
+  const directory = fs.mkdtempSync(path.join(require("os").tmpdir(), "spynel-npm-invocation-"));
+  try {
+    const tools = path.join(directory, "tools");
+    const globalRoot = path.join(directory, "prefix", "lib", "node_modules");
+    const packageRoot = path.join(globalRoot, "@digitalygo", "spynel");
+    fs.mkdirSync(tools);
+    fs.mkdirSync(packageRoot, { recursive: true });
+    const npm = path.join(tools, "npm");
+    const withFakeNPM = (script, run) => {
+      fs.writeFileSync(npm, script, { mode: 0o700 });
+      const previousPath = process.env.PATH;
+      const previousRoot = process.env.FAKE_NPM_ROOT;
+      process.env.PATH = tools + path.delimiter + previousPath;
+      process.env.FAKE_NPM_ROOT = globalRoot;
+      try {
+        run();
+      } finally {
+        process.env.PATH = previousPath;
+        if (previousRoot === undefined) delete process.env.FAKE_NPM_ROOT;
+        else process.env.FAKE_NPM_ROOT = previousRoot;
+      }
+    };
+    withFakeNPM(`#!${process.execPath}\nconsole.log(process.env.FAKE_NPM_ROOT);\n`, () => {
+      assert.deepStrictEqual(npmInvocation(packageRoot), {
+        command: "npm",
+        args: ["update", "--global", "@digitalygo/spynel"],
+        display: "npm update --global @digitalygo/spynel"
+      });
+    });
+    withFakeNPM(`#!${process.execPath}\nprocess.exit(1);\n`, () => {
+      assert.deepStrictEqual(npmInvocation(packageRoot), {
+        command: "npm",
+        args: ["update", "@digitalygo/spynel", "--prefix", path.join(directory, "prefix", "lib")],
+        display: "npm update @digitalygo/spynel"
+      });
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 async function main() {
+  checkNPMInvocation();
   checkLauncherUpdates();
   await checkLauncherSignals();
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
@@ -218,7 +263,7 @@ async function main() {
 
   const registry = http.createServer((_, response) => {
     response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ name: "spynel", version: "0.3.0" }));
+    response.end(JSON.stringify({ name: "@digitalygo/spynel", version: "0.3.0" }));
   });
   const registryURL = await listen(registry);
   try {

@@ -10,7 +10,7 @@ const pkg = require("../package.json");
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const STARTUP_PROMPT_TIMEOUT_MS = 10_000;
-const DEFAULT_REGISTRY_URL = "https://registry.npmjs.org/spynel/latest";
+const DEFAULT_REGISTRY_URL = "https://registry.npmjs.org/@digitalygo%2Fspynel/latest";
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
 function parseVersion(value) {
@@ -138,7 +138,8 @@ function npmInvocation(packageRoot = path.resolve(__dirname, "..")) {
   if (globalRoot && samePath(packageRoot, path.join(globalRoot, pkg.name))) {
     return { command: npm, args: ["update", "--global", pkg.name], display: `npm update --global ${pkg.name}` };
   }
-  const nodeModules = path.dirname(packageRoot);
+  const parent = path.dirname(packageRoot);
+  const nodeModules = path.basename(parent).startsWith("@") ? path.dirname(parent) : parent;
   const prefix = path.basename(nodeModules) === "node_modules" ? path.dirname(nodeModules) : process.cwd();
   return { command: npm, args: ["update", pkg.name, "--prefix", prefix], display: `npm update ${pkg.name}` };
 }

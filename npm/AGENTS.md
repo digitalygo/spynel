@@ -7,6 +7,8 @@
 ## Local Contracts
 
 - npm is a distribution wrapper only; runtime behavior remains in the Go binary.
+- Publish the scoped public package `@digitalygo/spynel`. The installed CLI command remains `spynel`, and native archive and binary names are unchanged.
+- The first publication bootstraps with the repository secret `NPM_TOKEN`; configure npm Trusted Publishing for `@digitalygo/spynel` after that release and remove the secret after one successful OIDC publication. Credential values never belong in repository content.
 - `package.json` lives at the repository root; launcher and installer sources live under `npm/`, and downloaded binaries live only in ignored `npm/vendor/` state.
 - Keep the committed npm version as the required development placeholder. Release preparation validates the GitHub release tag and prerelease classification, derives the published package version from that tag, and rewrites relative root-README links to immutable tag-pinned GitHub URLs.
 - Download native release assets from `github.com/digitalygo/spynel` unless `SPYNEL_DOWNLOAD_BASE` selects a trusted compatible mirror.

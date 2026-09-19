@@ -210,7 +210,7 @@ def main():
             npm_root = temp / "npm installation"
             vendor = npm_root / "npm" / "vendor"
             vendor.mkdir(parents=True)
-            (npm_root / "package.json").write_text(json.dumps({"name": "spynel", "version": old_version}))
+            (npm_root / "package.json").write_text(json.dumps({"name": "@digitalygo/spynel", "version": old_version}))
             (vendor / ".installed.json").write_text(json.dumps({"version": old_version}))
             (vendor / "spynel").write_text("unrelated npm executable\n")
             env.update(SPYNEL_NPM_PACKAGE_ROOT=str(npm_root), SPYNEL_NPM_LAUNCHER_MANAGED="1")
@@ -305,14 +305,14 @@ def main():
                 assert config.read_bytes() == original_config and sentinel.read_bytes() == original_task
             # Both installation sources may have active processes and future
             # startup registrations. Public uninstall removes both automatically.
-            npm_global = temp / "npm prefix" / "lib" / "node_modules" / "spynel"
+            npm_global = temp / "npm prefix" / "lib" / "node_modules" / "@digitalygo" / "spynel"
             npm_vendor = npm_global / "npm" / "vendor"
             shutil.copytree(archive_copy, npm_vendor)
-            (npm_global / "package.json").write_text(json.dumps({"name": "spynel", "version": old_version}))
+            (npm_global / "package.json").write_text(json.dumps({"name": "@digitalygo/spynel", "version": old_version}))
             npm_tool = tools / "npm"
-            npm_tool.write_text('#!/bin/sh\ncase "$*" in "root --global") printf "%s\\n" "$SPYNEL_TEST_NPM_MODULES";; *) [ "$1" = uninstall ] && [ "$2" = --global ] && [ "$3" = --prefix ] && [ "$4" = "$SPYNEL_TEST_NPM_PREFIX" ] && [ "$5" = spynel ] || exit 1; rm -rf "$SPYNEL_TEST_NPM_MODULES/spynel";; esac\n')
+            npm_tool.write_text('#!/bin/sh\ncase "$*" in "root --global") printf "%s\\n" "$SPYNEL_TEST_NPM_MODULES";; *) [ "$1" = uninstall ] && [ "$2" = --global ] && [ "$3" = --prefix ] && [ "$4" = "$SPYNEL_TEST_NPM_PREFIX" ] && [ "$5" = @digitalygo/spynel ] || exit 1; rm -rf "$SPYNEL_TEST_NPM_MODULES/@digitalygo/spynel";; esac\n')
             npm_tool.chmod(0o755)
-            env.update(SPYNEL_TEST_NPM_MODULES=str(npm_global.parent), SPYNEL_TEST_NPM_PREFIX=str(npm_global.parents[2]))
+            env.update(SPYNEL_TEST_NPM_MODULES=str(npm_global.parents[1]), SPYNEL_TEST_NPM_PREFIX=str(npm_global.parents[3]))
             npm_workspace = temp / "npm workspace"
             shutil.copytree(workspace, npm_workspace)
             units = user_home / ".config" / "systemd" / "user" if target_os == "linux" else user_home / "Library" / "LaunchAgents"

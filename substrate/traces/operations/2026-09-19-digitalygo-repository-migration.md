@@ -1,13 +1,16 @@
 ---
 status: completed
 created_at: 2026-09-19
+updated_at: 2026-09-19
 files_edited:
+  - .github/AGENTS.md
   - .github/workflows/AGENTS.md
   - .github/workflows/release.yml
   - .gitignore
   - AGENTS.md
   - README.md
   - cmd/spynel/main.go
+  - docs/AGENTS.md
   - docs/getting-started.md
   - docs/releasing.md
   - go.mod
@@ -22,9 +25,10 @@ files_edited:
   - scripts/native-evidence/main.go
   - scripts/test-standalone.py
   - uninstall.sh
-rationale: Migrate Spynel's canonical module, release, installer, updater, and documentation coordinates to the Digitalygo repository without changing supported distribution formats.
+rationale: Migrate Spynel's canonical module, release, installer, updater, and documentation coordinates to the Digitalygo repository without changing supported distribution formats. The npm identity later moved to the scoped public package @digitalygo/spynel while the spynel command and native artifact names stayed unchanged.
 supporting_docs:
   - ../research/2026-09-19-spynel-architecture-security-quality-gates.md
+  - ../status/2026-09-19-npm-publication-workspace-state.md
   - ../../../docs/releasing.md
 ---
 
@@ -83,3 +87,28 @@ The final implementation passed:
 - `git diff --check`.
 
 The hybrid quality judgment returned `PASS`. The focused security review returned `PASS` for the final updater, installer, npm, release-workflow, and standalone-verifier delta.
+
+## Update 2026-09-19: scoped npm package identity
+
+### Summary of changes
+
+The earlier decision to keep the npm package name unscoped as `spynel` was superseded. The npm package identity is now the scoped public package `@digitalygo/spynel`, documented across the README quick start, the getting started guide, the releasing guide, and the npm, documentation, GitHub automation, and root DOX contracts. The first publication still bootstraps with the GitHub Actions repository secret `NPM_TOKEN`; npm Trusted Publishing is then configured for `@digitalygo/spynel`, and the secret is removed after the first successful OIDC publication. The `spynel` CLI command, native archive and binary names, Digitalygo GitHub release coordinates, and supported release formats are unchanged. No credential value is recorded in this or any other repository document.
+
+### Technical reasoning
+
+The repository migration deliberately kept the unscoped npm name to limit its change surface, but that name does not express the Digitalygo ownership now encoded in the repository, Go module, release, and documentation coordinates. The scoped `@digitalygo/spynel` identity namespaces the package under the npm organization, aligns package discovery with the canonical Digitalygo coordinates, and avoids ambiguity with unrelated registry names. Bootstrap ordering is unchanged: npm cannot configure a trusted publisher before a package exists, so the first release uses the `NPM_TOKEN` repository secret, and steady-state publication uses OIDC plus provenance with no retained long-lived credential.
+
+### Impact assessment
+
+- Installation documentation uses `npm install -g @digitalygo/spynel`, while the installed command remains `spynel`.
+- npm publisher setup and the `npm trust github` example target `@digitalygo/spynel`; `NPM_TOKEN` is removed after the first successful trusted publication.
+- Native archive names, binary names, GitHub release coordinates, update formats, and the `v1.0.0` release bootstrap behavior are unchanged.
+- The scoped identity must also hold in the npm manifest and the launcher and updater code before publication; this update covers documentation and DOX contracts only.
+- The previous unscoped decision remains visible in the original sections above; this update supersedes it.
+
+### Validation steps
+
+- Re-read every changed document and contract and confirmed that remaining `spynel` references denote the command, module, workspace, binary, or archive rather than the npm package.
+- Confirmed that no credential value appears in any changed file.
+- Ran the repository DOX coverage gate on the changed contracts.
+- Ran `git diff --check` and verified whitespace, heading, and list consistency in the changed files.

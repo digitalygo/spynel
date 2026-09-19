@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +14,7 @@ import (
 
 func TestCheckFindsNewerNPMVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(writer).Encode(map[string]string{"name": "spynel", "version": "1.3.0"})
+		_ = json.NewEncoder(writer).Encode(map[string]string{"name": "@digitalygo/spynel", "version": "1.3.0"})
 	}))
 	defer server.Close()
 	manager := &Manager{
@@ -25,6 +27,58 @@ func TestCheckFindsNewerNPMVersion(t *testing.T) {
 	}
 	if !result.InstalledViaNPM || !result.Available || !result.CanAutoInstall || result.Latest != "1.3.0" {
 		t.Fatalf("result = %#v", result)
+	}
+	if result.Command != "npm update --global @digitalygo/spynel" {
+		t.Fatalf("command = %q", result.Command)
+	}
+}
+
+func TestDefaultRegistryEndpointUsesScopedPackage(t *testing.T) {
+	t.Setenv("SPYNEL_NPM_REGISTRY_URL", "")
+	t.Setenv("SPYNEL_NPM_PACKAGE_ROOT", "")
+	if got := Detect("1.2.3").RegistryURL; got != "https://registry.npmjs.org/@digitalygo%2Fspynel/latest" {
+		t.Fatalf("default registry = %q", got)
+	}
+}
+
+func TestNPMRootRequiresScopedPackageIdentity(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "npm", "vendor"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "npm", "vendor", ".installed.json"), []byte(`{"version":"1.2.3"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"spynel","version":"1.2.3"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if validNPMRoot(root, "1.2.3") {
+		t.Fatal("unscoped package identity was accepted as a Spynel npm root")
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"@digitalygo/spynel","version":"1.2.3"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !validNPMRoot(root, "1.2.3") {
+		t.Fatal("scoped package identity was rejected")
+	}
+}
+
+func TestNPMPackageRootUsesScopedLayout(t *testing.T) {
+	modules := filepath.Join("prefix", "lib", "node_modules")
+	if got, want := NPMPackageRoot(modules), filepath.Join(modules, "@digitalygo", "spynel"); got != want {
+		t.Fatalf("NPMPackageRoot = %q, want %q", got, want)
+	}
+}
+
+func TestProcessMatchesScopedNPMTemporaryDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "lib", "node_modules", "@digitalygo", "spynel")
+	retired := filepath.Join(filepath.Dir(root), ".spynel-8f3a91cd")
+	record := ProcessRegistration{Executable: filepath.Join(root, "npm", "vendor", "spynel"), Installation: root}
+	if !processMatches(record, filepath.Join(retired, "npm", "vendor", "spynel")) {
+		t.Fatal("scoped npm temporary package directory was not matched")
+	}
+	if processMatches(record, filepath.Join(filepath.Dir(root), "other", "npm", "vendor", "spynel")) {
+		t.Fatal("unrelated sibling directory was matched")
 	}
 }
 

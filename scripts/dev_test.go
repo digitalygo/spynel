@@ -68,6 +68,8 @@ func TestCanonicalRepositoryCoordinates(t *testing.T) {
 	const canonical = "github.com/" + ownerRepo
 	// Assembled from parts so this sentinel never matches the test's own source.
 	const retired = "agent0ai" + "/spynel"
+	const scopedPackage = "@digitalygo/spynel"
+	const scopedRegistryEndpoint = "https://registry.npmjs.org/@digitalygo%2Fspynel/latest"
 
 	module, err := os.ReadFile(filepath.Join("..", "go.mod"))
 	if err != nil {
@@ -119,8 +121,17 @@ func TestCanonicalRepositoryCoordinates(t *testing.T) {
 			"https://api.github.com/repos/" + ownerRepo + "/releases/latest",
 			"https://" + canonical + "/releases/download/v",
 		}},
+		{filepath.Join("..", "internal", "updater", "npm.go"), []string{
+			`NPMPackageName = "` + scopedPackage + `"`,
+		}},
+		{filepath.Join("..", "internal", "updater", "updater.go"), []string{
+			scopedRegistryEndpoint,
+		}},
 		{filepath.Join("..", "npm", "install.js"), []string{
 			"https://" + canonical + "/releases/download/v",
+		}},
+		{filepath.Join("..", "npm", "update.js"), []string{
+			scopedRegistryEndpoint,
 		}},
 		{filepath.Join("..", "npm", "prepare-release.js"), []string{
 			`const REPOSITORY = "` + ownerRepo + `"`,
@@ -129,6 +140,8 @@ func TestCanonicalRepositoryCoordinates(t *testing.T) {
 			"git+https://" + canonical + ".git",
 			"https://" + canonical + "/issues",
 			"https://" + canonical + "#readme",
+			`"name": "` + scopedPackage + `"`,
+			`"access": "public"`,
 		}},
 		{filepath.Join("..", "npm", "test.js"), []string{
 			"https://" + canonical + "/blob/",
@@ -159,6 +172,20 @@ func TestCanonicalRepositoryCoordinates(t *testing.T) {
 		}
 		if strings.Contains(content, retired) {
 			t.Errorf("%s must not reference the retired upstream repository", check.path)
+		}
+	}
+	for path, unscoped := range map[string][]string{
+		filepath.Join("..", "internal", "updater", "updater.go"): {"registry.npmjs.org/spynel"},
+		filepath.Join("..", "npm", "update.js"):                  {"registry.npmjs.org/spynel"},
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, coordinate := range unscoped {
+			if strings.Contains(string(data), coordinate) {
+				t.Errorf("%s must not keep unscoped npm coordinate %q", path, coordinate)
+			}
 		}
 	}
 

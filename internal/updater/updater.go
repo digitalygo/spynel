@@ -16,7 +16,7 @@ import (
 
 const (
 	DefaultCheckTimeout = 10 * time.Second
-	defaultRegistryURL  = "https://registry.npmjs.org/spynel/latest"
+	defaultRegistryURL  = "https://registry.npmjs.org/@digitalygo%2Fspynel/latest"
 	maxRegistryResponse = 64 * 1024
 	periodicChecksEnv   = "SPYNEL_NPM_PERIODIC_UPDATE_CHECKS"
 	checkedAtEnv        = "SPYNEL_NPM_UPDATE_CHECKED_AT"
@@ -173,7 +173,7 @@ func validNPMRoot(root, currentVersion string) bool {
 		return false
 	}
 	var metadata packageMetadata
-	if json.Unmarshal(data, &metadata) != nil || metadata.Name != "spynel" {
+	if json.Unmarshal(data, &metadata) != nil || metadata.Name != NPMPackageName {
 		return false
 	}
 	markerData, err := os.ReadFile(filepath.Join(root, "npm", "vendor", ".installed.json"))
@@ -193,7 +193,7 @@ func (m *Manager) Check(ctx context.Context) (Result, error) {
 		InstalledViaNPM: m != nil && m.PackageRoot != "",
 		Current:         "",
 		CanAutoInstall:  m != nil && m.PackageRoot != "" && m.LauncherManaged,
-		Command:         "npm update --global spynel",
+		Command:         "npm update --global " + NPMPackageName,
 	}
 	if m == nil {
 		return result, nil

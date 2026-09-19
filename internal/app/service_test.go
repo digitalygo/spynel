@@ -2071,7 +2071,7 @@ func TestUpdateCommandChecksNPMAndRequestsLauncherManagedInstall(t *testing.T) {
 	}
 	cfg, _ := config.Load(config.PathForRoot(root))
 	registry := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte(`{"name":"spynel","version":"1.3.0"}`))
+		_, _ = writer.Write([]byte(`{"name":"@digitalygo/spynel","version":"1.3.0"}`))
 	}))
 	defer registry.Close()
 	service := New(cfg, newServiceHarness())

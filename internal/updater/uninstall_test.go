@@ -21,7 +21,8 @@ func init() {
 		return
 	}
 	root := os.Getenv("SPYNEL_TEST_NPM_ROOT")
-	want := []string{"uninstall", "--global", "--prefix", filepath.Dir(filepath.Dir(filepath.Dir(root))), "spynel"}
+	prefix := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(root))))
+	want := []string{"uninstall", "--global", "--prefix", prefix, "@digitalygo/spynel"}
 	if strings.Join(os.Args[1:], "\x00") != strings.Join(want, "\x00") {
 		fmt.Fprintln(os.Stderr, "unexpected npm uninstall arguments")
 		os.Exit(1)
@@ -183,10 +184,10 @@ func TestUninstallNPMStopsBinaryBeforePackageRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(prefix, "lib", "node_modules", "spynel")
+	root := filepath.Join(prefix, "lib", "node_modules", "@digitalygo", "spynel")
 	process := uninstallFixtureProcess(t, filepath.Join(root, "npm", "vendor", "spynel"), "term")
 	for name, value := range map[string]any{
-		"package.json": map[string]string{"name": "spynel", "version": "0.12.2"},
+		"package.json": map[string]string{"name": "@digitalygo/spynel", "version": "0.12.2"},
 	} {
 		data, _ := json.Marshal(value)
 		if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
@@ -209,5 +210,26 @@ func TestUninstallNPMStopsBinaryBeforePackageRemoval(t *testing.T) {
 	}
 	if path, err := installationProcessPath(process.Process.Pid); err == nil && manager.ownsProcessPath(root, path) {
 		t.Fatal("npm process remains: " + strconv.Itoa(process.Process.Pid))
+	}
+}
+
+func TestUninstallRejectsUnscopedNPMLayout(t *testing.T) {
+	prefix, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(prefix, "lib", "node_modules", "spynel")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"spynel","version":"0.12.2"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := &Manager{PackageRoot: root}
+	if err := manager.Uninstall(t.Context(), func() error { return nil }); err == nil || !strings.Contains(err.Error(), "unsupported global npm installation layout") {
+		t.Fatalf("unscoped npm layout = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "package.json")); err != nil {
+		t.Fatal("rejected layout was modified")
 	}
 }

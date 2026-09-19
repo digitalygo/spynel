@@ -13,7 +13,7 @@
 - The published GitHub Release tag is the release version source; GitHub release archives and the derived npm package version must agree with it.
 - npm publication uses the released root README with relative links rewritten to immutable tag-pinned GitHub targets.
 - A published GitHub Release triggers verification, native builds, asset attachment, and mandatory npm publication. Stable releases publish to npm `latest`; semantic/GitHub prereleases publish to `next`.
-- Prefer npm Trusted Publishing with job-scoped OIDC and provenance. Allow `NPM_TOKEN` only as the first-publication fallback because npm cannot configure a trusted publisher before the package exists.
+- Prefer npm Trusted Publishing with job-scoped OIDC and provenance for the scoped `@digitalygo/spynel` package. Allow `NPM_TOKEN` only as the first-publication fallback because npm cannot configure a trusted publisher before the package exists, and remove it after one successful OIDC publication.
 - Cross-repository Homebrew/Scoop publishing uses an explicit release token; never embed credentials.
 - Actions must pin a stable major version and request only required workflow permissions.
 

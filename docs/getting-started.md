@@ -1,6 +1,6 @@
 # Getting started and development
 
-Spynel supports standalone script installation and the unscoped npm package on Linux and macOS. Both amd64 and arm64 are supported.
+Spynel supports standalone script installation and the scoped `@digitalygo/spynel` npm package on Linux and macOS. Both amd64 and arm64 are supported.
 
 ## Public-release quick start
 
@@ -28,7 +28,7 @@ This stops the installations' processes, removes their startup registrations, an
 Alternatively, npm requires Node.js 18 or newer:
 
 ```bash
-npm install -g spynel
+npm install -g @digitalygo/spynel
 spynel
 ```
 

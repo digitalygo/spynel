@@ -53,7 +53,7 @@ func runUninstallBundles(args []string) error {
 		if !filepath.IsAbs(modules) || strings.ContainsAny(modules, "\r\n") {
 			return errors.New("npm returned an invalid global package directory")
 		}
-		*npmRoot = filepath.Join(modules, "spynel")
+		*npmRoot = updater.NPMPackageRoot(modules)
 	}
 	if *npmRoot != "" {
 		if !filepath.IsAbs(*npmRoot) {

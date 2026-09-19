@@ -762,7 +762,7 @@ func TestOfflineUpdateInstallReturnsControlToNPMLauncher(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(packageRoot, "npm", "vendor"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(packageRoot, "package.json"), []byte(`{"name":"spynel","version":"1.2.0"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(packageRoot, "package.json"), []byte(`{"name":"@digitalygo/spynel","version":"1.2.0"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(packageRoot, "npm", "vendor", ".installed.json"), []byte(`{"version":"1.2.0"}`), 0o600); err != nil {
@@ -776,7 +776,7 @@ func TestOfflineUpdateInstallReturnsControlToNPMLauncher(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte(`{"name":"spynel","version":"1.3.0"}`))
+		_, _ = writer.Write([]byte(`{"name":"@digitalygo/spynel","version":"1.3.0"}`))
 	}))
 	defer registry.Close()
 	t.Setenv("SPYNEL_NPM_PACKAGE_ROOT", packageRoot)
