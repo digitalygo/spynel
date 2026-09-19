@@ -169,7 +169,7 @@ func runHarnessFixture(mode string) int {
 		return runCodexFixture(mode)
 	case "claude-stream", "claude-steer", "claude-text", "claude-interrupt", "claude-help-missing-flag", "claude-init-changed-event", "claude-terminal-error", "claude-result-nonzero":
 		return runClaudeFixture(mode)
-	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default":
+	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui":
 		return runPiFixture(mode)
 	case "acp-lifecycle", "acp-interrupt", "acp-version-mismatch", "acp-session-error":
 		return runACPFixture(mode)
@@ -266,7 +266,10 @@ func runPiFixture(mode string) int {
 		case "prompt":
 			respond(message, map[string]any{})
 			messageStart()
-			if mode == "pi-steer" {
+			if mode == "pi-extension-ui" {
+				write(map[string]any{"type": "extension_ui_request", "id": "ui-1", "method": "confirm", "title": "Run project-local agents?", "message": "Agents: demo"})
+				write(map[string]any{"type": "extension_ui_request", "id": "ui-2", "method": "notify", "message": "fire-and-forget"})
+			} else if mode == "pi-steer" {
 				delta("first")
 			} else if mode == "pi-interrupt" {
 				delta("working")
@@ -289,6 +292,18 @@ func runPiFixture(mode string) int {
 			respond(message, map[string]any{})
 			messageEnd("working", "aborted")
 			write(map[string]any{"type": "agent_settled"})
+		case "extension_ui_response":
+			if mode != "pi-extension-ui" || message.ID != "ui-1" {
+				break
+			}
+			delta("hello ")
+			delta("world")
+			messageEnd("hello world", "stop")
+			write(map[string]any{"type": "agent_end"})
+			go func() {
+				time.Sleep(80 * time.Millisecond)
+				write(map[string]any{"type": "agent_settled"})
+			}()
 		}
 	}
 	return 0
