@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/digitalygo/spynel/internal/config"
 	"github.com/digitalygo/spynel/internal/core"
 	"github.com/digitalygo/spynel/internal/harness"
+	markdownfmt "github.com/digitalygo/spynel/internal/markdown"
 	"github.com/digitalygo/spynel/internal/workspace"
 )
 
@@ -28,12 +30,14 @@ type piControlHarness struct {
 	mu            sync.Mutex
 	info          harness.SessionInfo
 	found         bool
+	infoErr       error
 	rotate        string
 	compact       harness.CompactResult
 	compactErr    error
 	importErr     error
 	failSend      bool
 	suppressFinal int
+	reply         string
 	sessionCalls  int
 	compactCalls  []string
 	importCalls   []string
@@ -47,7 +51,7 @@ func (h *piControlHarness) SessionInfo(string) (harness.SessionInfo, bool, error
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.sessionCalls++
-	return h.info, h.found, nil
+	return h.info, h.found, h.infoErr
 }
 
 func (h *piControlHarness) CompactSession(_ context.Context, key, instructions string) (harness.CompactResult, error) {
@@ -80,6 +84,7 @@ func (h *piControlHarness) Send(_ context.Context, key, prompt string, emit core
 	}
 	info, found := h.info, h.found
 	fail := h.failSend
+	reply := h.reply
 	suppress := h.suppressFinal > 0
 	if suppress {
 		h.suppressFinal--
@@ -100,6 +105,9 @@ func (h *piControlHarness) Send(_ context.Context, key, prompt string, emit core
 		return thread, false, nil
 	}
 	text := "answer for " + key
+	if reply != "" {
+		text = reply
+	}
 	emit(core.Event{Kind: core.EventFinal, Text: text, FinalText: &text, ThreadID: thread, Done: true})
 	return thread, false, nil
 }
@@ -257,7 +265,7 @@ func TestPiCompactReportsBoundedCountsAndBoundsInstructions(t *testing.T) {
 	if reply.Text != "Pi compaction complete: 150000 tokens before." {
 		t.Fatalf("compact reply without estimate = %q", reply.Text)
 	}
-	oversized := "/pi compact " + strings.Repeat("x", piControlMaxInstructions+1)
+	oversized := "/pi compact " + strings.Repeat("x", harness.SessionCompactMaxInstructions+1)
 	reply = runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: oversized})
 	if !strings.Contains(reply.Text, "4096") {
 		t.Fatalf("oversized compact reply = %q", reply.Text)
@@ -439,5 +447,84 @@ func TestPiNewSessionNoticeSurvivesAnEarlySteerRelease(t *testing.T) {
 	third := runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: "third"})
 	if strings.Contains(third.Text, "Pi session `") {
 		t.Fatalf("session notice repeated after a steer release: %q", third.Text)
+	}
+}
+
+func TestPiControlRepliesSanitizeAdapterErrors(t *testing.T) {
+	target := newPiControlHarness()
+	service := newPiControlService(t, target)
+	sessionDir := filepath.Join(service.Config.Root, ".spynel", "runtime", "pi-sessions")
+	sessionPath := filepath.Join(sessionDir, "private.jsonl")
+	target.info = harness.SessionInfo{ID: piControlTestSession, Path: sessionPath, Command: "pi"}
+	target.found = true
+	target.compactErr = errors.New("mkdir " + sessionDir + ": not a directory\nprovider detail\x00")
+	reply := runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: "/pi compact"})
+	if strings.Contains(reply.Text, service.Config.Root) || strings.Contains(reply.Text, sessionDir) || strings.Contains(reply.Text, sessionPath) {
+		t.Fatalf("compact reply leaked a workspace or session path: %q", reply.Text)
+	}
+	if strings.ContainsAny(reply.Text, "\n\x00") {
+		t.Fatalf("compact reply kept a control character: %q", reply.Text)
+	}
+	if !strings.Contains(reply.Text, "<session>") || !strings.Contains(reply.Text, "provider detail") {
+		t.Fatalf("compact reply lost bounded context: %q", reply.Text)
+	}
+
+	target.mu.Lock()
+	target.compactErr = nil
+	target.importErr = errors.New("fork Pi session: open " + sessionPath + ": permission denied\x01")
+	target.mu.Unlock()
+	reply = runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: "/pi import " + piControlImportID})
+	if strings.Contains(reply.Text, service.Config.Root) || strings.Contains(reply.Text, sessionPath) {
+		t.Fatalf("import reply leaked a workspace or session path: %q", reply.Text)
+	}
+	if strings.ContainsAny(reply.Text, "\x01") || !strings.Contains(reply.Text, "<session>") {
+		t.Fatalf("import reply was not sanitized: %q", reply.Text)
+	}
+
+	target.mu.Lock()
+	target.importErr = nil
+	target.infoErr = errors.New("inspect " + service.Config.Root + "/.spynel: " + strings.Repeat("x", harness.ControlErrorMaxRunes+100))
+	target.mu.Unlock()
+	reply = runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: "/pi session"})
+	if strings.Contains(reply.Text, service.Config.Root) {
+		t.Fatalf("session reply leaked the workspace path: %q", reply.Text)
+	}
+	if runes := []rune(reply.Text); len(runes) > len("Cannot inspect the Pi session: ")+harness.ControlErrorMaxRunes+3 {
+		t.Fatalf("session reply was not bounded: %d runes", len(runes))
+	}
+}
+
+func TestPiNewSessionNoticeLeadsTelegramRichChunkingWithoutHistory(t *testing.T) {
+	target := newPiControlHarness()
+	target.rotate = piControlNewSession
+	target.reply = strings.Repeat("Telegram rich response line\n\n", 400)
+	service := newPiControlService(t, target)
+	final := runPiControlMessage(t, service, core.Message{Channel: "telegram", Conversation: "TG-7", Text: "hello"})
+	notice := "Pi session `" + piControlNewSession + "`."
+	if final.Kind != core.EventFinal || !strings.HasPrefix(final.Text, notice) {
+		t.Fatalf("telegram final = %#v, want leading %q", final, notice)
+	}
+	if final.FinalText == nil || !strings.HasPrefix(*final.FinalText, notice) {
+		t.Fatalf("telegram FinalText = %v, want leading %q", final.FinalText, notice)
+	}
+	chunks := markdownfmt.TelegramChunks(*final.FinalText)
+	if len(chunks) < 2 {
+		t.Fatalf("reply did not reach rich chunking: %d chunks", len(chunks))
+	}
+	first := markdownfmt.TelegramChunkPlainText(chunks[0])
+	if !strings.HasPrefix(first, "Pi session "+piControlNewSession+".") {
+		t.Fatalf("first rich chunk lost the leading session notice: %q", first)
+	}
+	entries, _, err := service.History.RecentEntries("telegram", "TG-7", 50, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Content, piControlNewSession) {
+			t.Fatalf("session notice entered durable history: %#v", entry)
+		}
+		if entry.FinalText != nil && strings.Contains(*entry.FinalText, piControlNewSession) {
+			t.Fatalf("session notice entered durable final text: %#v", entry)
+		}
 	}
 }

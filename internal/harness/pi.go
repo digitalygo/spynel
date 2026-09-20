@@ -144,6 +144,7 @@ func (p *Pi) Start(parent context.Context) error {
 	output := newTailBuffer(16 * 1024)
 	command := exec.CommandContext(checkContext, p.config.Command, "--version")
 	command.Dir = p.config.Cwd
+	command.Env = piProcessEnvironment(p.config.Env)
 	command.Stdout = output
 	command.Stderr = output
 	if err := command.Run(); err != nil {
@@ -580,6 +581,7 @@ func (p *Pi) startProcessArgs(ctx context.Context, key string, args []string, cf
 	}
 	command := exec.CommandContext(processContext, cfg.Command, args...)
 	command.Dir = cfg.Cwd
+	command.Env = piProcessEnvironment(cfg.Env)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		cancel()
@@ -1052,6 +1054,17 @@ func (p *Pi) sessionPolicyLocked(model, effort string) string {
 
 func piSessionPolicy(cfg HarnessConfig) string {
 	return strings.Join([]string{cfg.Command, cfg.Cwd, cfg.Model, cfg.Effort, cfg.Sandbox}, "\x1f")
+}
+
+// piProcessEnvironment applies HarnessConfig.Env overrides over the inherited
+// process environment. Later duplicate names win, matching exec's own
+// deduplication, so the launched Pi process observes the same effective
+// environment that external session resolution assumed.
+func piProcessEnvironment(overrides []string) []string {
+	if len(overrides) == 0 {
+		return nil
+	}
+	return append(os.Environ(), overrides...)
 }
 
 func (p *Pi) loadSessions() error {

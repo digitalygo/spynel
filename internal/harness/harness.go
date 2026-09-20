@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"unicode"
@@ -149,6 +150,48 @@ type CompactResult struct {
 	TokensBefore     int
 	TokensAfter      int
 	TokensAfterKnown bool
+}
+
+// SessionCompactMaxInstructions bounds one custom compaction instruction set.
+// Session-control surfaces and adapters validate against this single value so
+// the user-facing and provider-facing bounds stay identical.
+const SessionCompactMaxInstructions = 4096
+
+// ControlErrorMaxRunes bounds one session-control adapter error rendered into
+// a local reply so provider prose can never dominate the response.
+const ControlErrorMaxRunes = 400
+
+// SafeControlErrorText bounds and sanitizes one session-control adapter error
+// for a user-facing reply. Every provided sensitive value is redacted and
+// control characters are removed, so provider prose can never leak session or
+// workspace paths, credentials, or terminal escapes into a command response.
+func SafeControlErrorText(err error, sensitive ...string) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	ordered := append([]string(nil), sensitive...)
+	sort.SliceStable(ordered, func(i, j int) bool { return len(ordered[i]) > len(ordered[j]) })
+	for _, value := range ordered {
+		if value != "" {
+			text = strings.ReplaceAll(text, value, "<session>")
+		}
+	}
+	text = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		default:
+			return r
+		}
+	}, text)
+	text = strings.Join(strings.Fields(text), " ")
+	if runes := []rune(text); len(runes) > ControlErrorMaxRunes {
+		text = string(runes[:ControlErrorMaxRunes]) + "..."
+	}
+	return text
 }
 
 // SessionInspector is an optional capability that reports the current

@@ -17,17 +17,17 @@ import (
 
 // Explicit bounds for read-only external session discovery. The walk never
 // follows symlinks, never opens more than the bounded candidate count, and
-// only reads a bounded first line from each candidate file.
+// reads directories incrementally so one huge directory cannot allocate
+// unbounded memory before an entry budget is enforced.
 const (
-	piCompactMaxInstructions = 4096
-
-	piSettingsMaxBytes          = 1 << 20
-	piSessionScanMaxDepth       = 8
-	piSessionScanMaxDirectories = 512
-	piSessionScanMaxFiles       = 4096
-	piSessionHeaderMaxBytes     = 64 << 10
-	piSessionSourceMaxBytes     = 256 << 20
-	piControlErrorMaxRunes      = 400
+	piDirectoryBatchSize             = 256
+	piSettingsMaxBytes               = 1 << 20
+	piSessionScanMaxDepth            = 8
+	piSessionScanMaxDirectories      = 512
+	piSessionScanMaxDirectoryEntries = 2048
+	piSessionScanMaxFiles            = 4096
+	piSessionHeaderMaxBytes          = 64 << 10
+	piSessionSourceMaxBytes          = 256 << 20
 )
 
 var piSessionIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -60,8 +60,8 @@ func (p *Pi) CompactSession(ctx context.Context, key, instructions string) (Comp
 	if !utf8.ValidString(instructions) {
 		return CompactResult{}, errors.New("Pi compaction instructions must be valid UTF-8")
 	}
-	if utf8.RuneCountInString(instructions) > piCompactMaxInstructions {
-		return CompactResult{}, fmt.Errorf("Pi compaction instructions must be at most %d characters", piCompactMaxInstructions)
+	if utf8.RuneCountInString(instructions) > SessionCompactMaxInstructions {
+		return CompactResult{}, fmt.Errorf("Pi compaction instructions must be at most %d characters", SessionCompactMaxInstructions)
 	}
 	instructions = strings.TrimSpace(instructions)
 	lock := p.lockForKey(key)
@@ -97,7 +97,7 @@ func (p *Pi) CompactSession(ctx context.Context, key, instructions string) (Comp
 	}
 	data, err := process.call(ctx, request, nil)
 	if err != nil {
-		return CompactResult{}, fmt.Errorf("Pi rejected the compaction request: %s", piSafeErrorText(err, session.Path, p.sessionDirectory(cfg)))
+		return CompactResult{}, fmt.Errorf("Pi rejected the compaction request: %w", piSafeControlError(err, append([]string{session.Path}, p.piControlSensitivePaths(cfg)...)...))
 	}
 	var response struct {
 		TokensBefore         *int `json:"tokensBefore"`
@@ -114,11 +114,15 @@ func (p *Pi) CompactSession(ctx context.Context, key, instructions string) (Comp
 	return result, nil
 }
 
-// resumeExistingProcess returns an idle process for one persisted session,
-// reusing a policy-matching live process and otherwise resuming the exact
-// stored file. Every start is validated before persistence, and an unexpected
-// file created by a failed resume is removed only when it is a regular file
-// inside the Spynel session directory.
+// resumeExistingProcess returns an idle process for one persisted session. It
+// refuses a stored session whose policy was captured under a different
+// command, working directory, model, effort, or sandbox so a control
+// operation can never resume and re-persist a session under the wrong
+// configuration; the caller must send an ordinary prompt to create the
+// active-policy session instead. A policy-matching live process is reused and
+// otherwise the exact stored file is resumed. Every start is validated before
+// persistence, and an unexpected file created by a failed resume is removed
+// only when it is a regular file inside the Spynel session directory.
 func (p *Pi) resumeExistingProcess(ctx context.Context, key string, session piSession) (*piProcess, error) {
 	p.mu.Lock()
 	if p.closed || p.ctx == nil {
@@ -126,6 +130,10 @@ func (p *Pi) resumeExistingProcess(ctx context.Context, key string, session piSe
 		return nil, errors.New("Pi harness is not running")
 	}
 	cfg := p.config
+	if session.Policy != piSessionPolicy(cfg) {
+		p.mu.Unlock()
+		return nil, errors.New("the stored Pi session was created with a different harness configuration; send an ordinary prompt to create a session under the current configuration")
+	}
 	if process := p.processes[key]; process != nil {
 		process.mu.Lock()
 		active := process.active != nil
@@ -147,6 +155,10 @@ func (p *Pi) resumeExistingProcess(ctx context.Context, key string, session piSe
 	}
 	p.mu.Unlock()
 	sessionDir := p.sessionDirectory(cfg)
+	// Snapshot the directory before resume so failure cleanup can only remove a
+	// file the snapshot proves was absent; a pre-existing sibling reported by a
+	// hostile or confused provider survives untouched.
+	existing := snapshotPiSessionDirectory(sessionDir)
 	created := ""
 	validate := func(state piState) error {
 		created = state.SessionFile
@@ -160,14 +172,14 @@ func (p *Pi) resumeExistingProcess(ctx context.Context, key string, session piSe
 	}
 	process, err := p.startProcessValidated(ctx, key, session, false, cfg.Model, cfg.Effort, validate)
 	if err != nil {
-		piRemoveSessionFile(sessionDir, created, session.Path)
-		return nil, fmt.Errorf("resume Pi session: %s", piSafeErrorText(err, session.Path, sessionDir))
+		piRemoveSessionFile(sessionDir, created, session.Path, existing)
+		return nil, fmt.Errorf("resume Pi session: %w", piSafeControlError(err, append([]string{session.Path}, p.piControlSensitivePaths(cfg)...)...))
 	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		process.close()
-		piRemoveSessionFile(sessionDir, created, session.Path)
+		piRemoveSessionFile(sessionDir, created, session.Path, existing)
 		return nil, errors.New("Pi harness closed while resuming a session")
 	}
 	if existing := p.processes[key]; existing != nil {
@@ -184,7 +196,13 @@ func (p *Pi) resumeExistingProcess(ctx context.Context, key string, session piSe
 // starting Pi, then forks the exact validated file into the workspace-local
 // session directory through a real Pi RPC process. It refuses an existing
 // conversation session, validates the fork before persisting anything, and
-// never opens or mutates the source file.
+// never opens or mutates the source file. Cleanup can only remove a reported
+// fork file the pre-import snapshot proves was absent; if Pi creates a fork
+// file and fails before get_state ever reports its path, that file is an
+// unavoidable inert orphan: the adapter has no path to remove, and scanning
+// the shared session directory to guess one could delete another
+// conversation's session. The session map stays unchanged in that case, so
+// the orphan is never resumed or referenced.
 func (p *Pi) ImportSession(ctx context.Context, key, sessionID string) (SessionInfo, error) {
 	lock := p.lockForKey(key)
 	lock.Lock()
@@ -209,7 +227,7 @@ func (p *Pi) ImportSession(ctx context.Context, key, sessionID string) (SessionI
 			return SessionInfo{}, errors.New("cannot import a Pi session while a turn is active")
 		}
 	}
-	source, err := resolveExternalPiSession(sessionID, cfg.Cwd)
+	source, err := resolveExternalPiSession(sessionID, cfg.Cwd, cfg.Env)
 	if err != nil {
 		return SessionInfo{}, err
 	}
@@ -219,8 +237,14 @@ func (p *Pi) ImportSession(ctx context.Context, key, sessionID string) (SessionI
 	}
 	sessionDir := p.sessionDirectory(cfg)
 	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		return SessionInfo{}, err
+		return SessionInfo{}, fmt.Errorf("prepare the Spynel Pi session directory: %w", piSafeControlError(err, sessionDir))
 	}
+	// Snapshot the session directory before forking. Cleanup may remove only a
+	// reported path the snapshot proves was absent, so Pi can never trick
+	// import recovery into deleting a pre-existing sibling session. If the
+	// snapshot cannot prove absence (unreadable or over budget), cleanup fails
+	// closed and leaves the path in place.
+	existing := snapshotPiSessionDirectory(sessionDir)
 	created := ""
 	validate := func(state piState) error {
 		created = state.SessionFile
@@ -233,31 +257,34 @@ func (p *Pi) ImportSession(ctx context.Context, key, sessionID string) (SessionI
 		if !piPathWithin(sessionDir, state.SessionFile) {
 			return errors.New("Pi stored the forked session outside the Spynel session directory")
 		}
+		if !existing.absentBefore(state.SessionFile) {
+			return errors.New("Pi reported a session file that already existed before this import; import fails closed")
+		}
 		return nil
 	}
 	args := []string{"--mode", "rpc", "--session-dir", sessionDir, "--fork", source.Path}
 	fork, err := p.startProcessArgs(ctx, key, args, cfg, true, false, validate)
 	if err != nil {
-		piRemoveSessionFile(sessionDir, created, source.Path)
-		return SessionInfo{}, fmt.Errorf("fork Pi session: %s", piSafeErrorText(err, source.Path, sessionDir))
+		piRemoveSessionFile(sessionDir, created, source.Path, existing)
+		return SessionInfo{}, fmt.Errorf("fork Pi session: %w", piSafeControlError(err, append([]string{source.Path}, p.piControlSensitivePaths(cfg)...)...))
 	}
 	after, statErr := os.Stat(source.Path)
 	if statErr != nil || !piSourceUnchanged(before, after) {
 		fork.close()
-		piRemoveSessionFile(sessionDir, created, source.Path)
+		piRemoveSessionFile(sessionDir, created, source.Path, existing)
 		return SessionInfo{}, errors.New("the direct Pi session changed while it was being forked; close direct Pi and retry")
 	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		fork.close()
-		piRemoveSessionFile(sessionDir, created, source.Path)
+		piRemoveSessionFile(sessionDir, created, source.Path, existing)
 		return SessionInfo{}, errors.New("Pi harness closed while importing a session")
 	}
 	if p.processes[key] != nil || p.sessions[key].ID != "" {
 		p.mu.Unlock()
 		fork.close()
-		piRemoveSessionFile(sessionDir, created, source.Path)
+		piRemoveSessionFile(sessionDir, created, source.Path, existing)
 		return SessionInfo{}, errors.New("this conversation already has a harness session; use /clear before importing another")
 	}
 	p.processes[key] = fork
@@ -274,8 +301,8 @@ func (p *Pi) ImportSession(ctx context.Context, key, sessionID string) (SessionI
 		}
 		p.mu.Unlock()
 		fork.close()
-		piRemoveSessionFile(sessionDir, created, source.Path)
-		return SessionInfo{}, err
+		piRemoveSessionFile(sessionDir, created, source.Path, existing)
+		return SessionInfo{}, fmt.Errorf("persist the imported Pi session: %w", piSafeControlError(err, append([]string{source.Path}, p.piControlSensitivePaths(cfg)...)...))
 	}
 	return SessionInfo{ID: fork.session.ID, Path: fork.session.Path, Command: cfg.Command}, nil
 }
@@ -284,13 +311,13 @@ func (p *Pi) ImportSession(ctx context.Context, key, sessionID string) (SessionI
 // header is a supported Pi session header with the exact requested UUID and a
 // canonical cwd equal to the Spynel harness cwd. Zero, ambiguous, unreadable,
 // or foreign-workspace matches fail closed without naming other paths.
-func resolveExternalPiSession(sessionID, cwd string) (piSessionSource, error) {
+func resolveExternalPiSession(sessionID, cwd string, env []string) (piSessionSource, error) {
 	if !piSessionIDPattern.MatchString(sessionID) {
 		return piSessionSource{}, errors.New("Pi import requires the full canonical session UUID")
 	}
 	budget := &piSessionScanBudget{}
 	var matches []piSessionSource
-	for _, root := range piCandidateSessionRoots(cwd) {
+	for _, root := range piCandidateSessionRoots(cwd, piEffectiveEnvLookup(env)) {
 		if err := walkPiSessionRoot(root, 0, sessionID, budget, &matches); err != nil {
 			return piSessionSource{}, err
 		}
@@ -309,10 +336,12 @@ func resolveExternalPiSession(sessionID, cwd string) (piSessionSource, error) {
 }
 
 // piCandidateSessionRoots derives bounded read-only lookup roots from the
-// effective process environment, readable global and project settings, and
-// the standard Pi agent sessions directory. Relative settings paths resolve
-// from the Pi process working directory, which is the Spynel harness cwd.
-func piCandidateSessionRoots(cwd string) []string {
+// effective Pi process environment, readable settings, and the standard Pi
+// agent sessions directory. Relative values resolve from the Pi process
+// working directory, which is the Spynel harness cwd, matching Pi's own
+// SessionManager and FileSettingsStorage resolution. Project settings
+// override global settings exactly like Pi's settings merge.
+func piCandidateSessionRoots(cwd string, lookup func(string) string) []string {
 	roots := make([]string, 0, 4)
 	seen := map[string]bool{}
 	add := func(value string) {
@@ -323,20 +352,30 @@ func piCandidateSessionRoots(cwd string) []string {
 		seen[value] = true
 		roots = append(roots, value)
 	}
-	agentDir := piEffectiveAgentDir()
-	add(piEnvironmentValue("PI_CODING_AGENT_SESSION_DIR"))
+	agentDir := piEffectiveAgentDir(cwd, lookup)
+	projectSettingsDir := piSettingsSessionDir(filepath.Join(cwd, ".pi", "settings.json"), cwd)
+	globalSettingsDir := ""
 	if agentDir != "" {
-		add(piSettingsSessionDir(filepath.Join(agentDir, "settings.json"), cwd))
+		globalSettingsDir = piSettingsSessionDir(filepath.Join(agentDir, "settings.json"), cwd)
+	}
+	add(lookup("PI_CODING_AGENT_SESSION_DIR"))
+	if projectSettingsDir != "" {
+		add(projectSettingsDir)
+	} else {
+		add(globalSettingsDir)
+	}
+	if agentDir != "" {
 		add(filepath.Join(agentDir, "sessions"))
 	}
-	add(piSettingsSessionDir(filepath.Join(cwd, ".pi", "settings.json"), cwd))
 	return roots
 }
 
-func piEffectiveAgentDir() string {
-	if value := piEnvironmentValue("PI_CODING_AGENT_DIR"); value != "" {
-		home, _ := os.UserHomeDir()
-		return piExpandPath(value, home)
+// piEffectiveAgentDir resolves Pi's agent config directory from the effective
+// environment. Pi tilde-expands PI_CODING_AGENT_DIR and resolves a relative
+// value from the process working directory, so the same rule applies here.
+func piEffectiveAgentDir(cwd string, lookup func(string) string) string {
+	if value := lookup("PI_CODING_AGENT_DIR"); value != "" {
+		return piExpandPath(value, cwd)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -345,12 +384,26 @@ func piEffectiveAgentDir() string {
 	return filepath.Join(home, ".pi", "agent")
 }
 
-func piEnvironmentValue(name string) string {
-	value, ok := os.LookupEnv(name)
-	if !ok {
-		return ""
+// piEffectiveEnvLookup resolves environment values from the inherited process
+// environment with HarnessConfig.Env overrides applied last, so a later
+// duplicate name wins exactly like process launch. This keeps external
+// session resolution and the launched provider on the same effective
+// environment.
+func piEffectiveEnvLookup(overrides []string) func(string) string {
+	values := make(map[string]string, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			values[key] = value
+		}
 	}
-	return strings.TrimSpace(value)
+	for _, entry := range overrides {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			values[key] = value
+		}
+	}
+	return func(name string) string {
+		return strings.TrimSpace(values[name])
+	}
 }
 
 // piSettingsSessionDir reads only the bounded sessionDir value from one Pi
@@ -423,8 +476,11 @@ func (b *piSessionScanBudget) scanEntry() error {
 }
 
 // walkPiSessionRoot descends one candidate root without following symlinks.
-// Unreadable candidates fail closed, while directories beyond the depth bound
-// are skipped so a deep unrelated tree cannot exhaust the scan.
+// Directory entries stream through bounded batches with a per-directory entry
+// cap, so an enormous directory cannot allocate unbounded memory before the
+// explicit budget is enforced. Unreadable candidates fail closed, while
+// directories beyond the depth bound are skipped so a deep unrelated tree
+// cannot exhaust the scan.
 func walkPiSessionRoot(root string, depth int, sessionID string, budget *piSessionScanBudget, matches *[]piSessionSource) error {
 	info, err := os.Lstat(root)
 	if err != nil {
@@ -439,29 +495,22 @@ func walkPiSessionRoot(root string, depth int, sessionID string, budget *piSessi
 	if err := budget.enterDirectory(); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return errors.New("Pi session lookup could not read a candidate session directory")
-	}
-	for _, entry := range entries {
+	return readPiDirectoryEntries(root, piSessionScanMaxDirectoryEntries, func(entry os.DirEntry) error {
 		if entry.Type()&os.ModeSymlink != 0 {
-			continue
+			return nil
 		}
 		name := entry.Name()
 		if entry.IsDir() {
 			if depth+1 >= piSessionScanMaxDepth {
-				continue
+				return nil
 			}
-			if err := walkPiSessionRoot(filepath.Join(root, name), depth+1, sessionID, budget, matches); err != nil {
-				return err
-			}
-			continue
+			return walkPiSessionRoot(filepath.Join(root, name), depth+1, sessionID, budget, matches)
 		}
 		if err := budget.scanEntry(); err != nil {
 			return err
 		}
 		if !strings.HasSuffix(strings.ToLower(name), ".jsonl") {
-			continue
+			return nil
 		}
 		source, ok, err := readPiSessionHeader(filepath.Join(root, name), sessionID)
 		if err != nil {
@@ -470,8 +519,39 @@ func walkPiSessionRoot(root string, depth int, sessionID string, budget *piSessi
 		if ok {
 			*matches = append(*matches, source)
 		}
+		return nil
+	})
+}
+
+// readPiDirectoryEntries streams one directory in small batches so a huge
+// directory never allocates its complete entry list before the caller's
+// per-directory cap is applied. Reading stops with errPiSessionScanLimit once
+// the cap is exceeded.
+func readPiDirectoryEntries(dir string, limit int, visit func(entry os.DirEntry) error) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return errors.New("Pi session lookup could not read a candidate session directory")
 	}
-	return nil
+	defer file.Close()
+	count := 0
+	for {
+		entries, readErr := file.ReadDir(piDirectoryBatchSize)
+		for _, entry := range entries {
+			count++
+			if count > limit {
+				return errPiSessionScanLimit
+			}
+			if err := visit(entry); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return errors.New("Pi session lookup could not read a candidate session directory")
+		}
+	}
 }
 
 // readPiSessionHeader validates one candidate file from its bounded first
@@ -544,14 +624,70 @@ func piPathWithin(dir, path string) bool {
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
+// piSessionSnapshot records the subtree that existed in one Spynel session
+// directory before a control operation. Cleanup removes a reported path only
+// when the snapshot proves it was absent beforehand, so a hostile or confused
+// provider can never trick import or resume recovery into deleting a
+// pre-existing sibling session. An unreadable or over-budget snapshot yields
+// known=false and makes cleanup fail closed.
+type piSessionSnapshot struct {
+	dir   string
+	known bool
+	paths map[string]struct{}
+}
+
+func (s piSessionSnapshot) absentBefore(path string) bool {
+	if !s.known || path == "" || s.dir == "" {
+		return false
+	}
+	relative, err := filepath.Rel(filepath.Clean(s.dir), filepath.Clean(path))
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	_, existed := s.paths[relative]
+	return !existed
+}
+
+// snapshotPiSessionDirectory captures the pre-existing subtree with the same
+// directory, entry, and depth budgets as session discovery.
+func snapshotPiSessionDirectory(dir string) piSessionSnapshot {
+	snapshot := piSessionSnapshot{dir: filepath.Clean(dir), known: true, paths: map[string]struct{}{}}
+	if err := snapshotPiSessionDirectoryInto(dir, "", 0, &snapshot); err != nil {
+		snapshot.known = false
+		snapshot.paths = nil
+	}
+	return snapshot
+}
+
+func snapshotPiSessionDirectoryInto(dir, prefix string, depth int, snapshot *piSessionSnapshot) error {
+	if depth > piSessionScanMaxDepth {
+		return errPiSessionScanLimit
+	}
+	return readPiDirectoryEntries(dir, piSessionScanMaxDirectoryEntries, func(entry os.DirEntry) error {
+		if len(snapshot.paths) >= piSessionScanMaxFiles {
+			return errPiSessionScanLimit
+		}
+		relative := entry.Name()
+		if prefix != "" {
+			relative = filepath.Join(prefix, entry.Name())
+		}
+		snapshot.paths[relative] = struct{}{}
+		if entry.Type()&os.ModeSymlink == 0 && entry.IsDir() {
+			return snapshotPiSessionDirectoryInto(filepath.Join(dir, entry.Name()), relative, depth+1, snapshot)
+		}
+		return nil
+	})
+}
+
 // piRemoveSessionFile removes only a regular file inside the Spynel session
-// directory that is not the validated source. It is the cleanup boundary for
-// failed control operations, never a rename or mutation of a source session.
-func piRemoveSessionFile(sessionDir, path, source string) {
+// directory that is not the validated source and that the pre-operation
+// snapshot proves was absent. It is the cleanup boundary for failed control
+// operations, never a rename or mutation of a source or pre-existing session.
+func piRemoveSessionFile(sessionDir, path, source string, snapshot piSessionSnapshot) {
 	if path == "" || source == "" {
 		return
 	}
-	if samePiPath(path, source) || !piPathWithin(sessionDir, path) {
+	if samePiPath(path, source) || !piPathWithin(sessionDir, path) || !snapshot.absentBefore(path) {
 		return
 	}
 	info, err := os.Lstat(path)
@@ -570,29 +706,31 @@ func piSourceUnchanged(before, after os.FileInfo) bool {
 	return os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
 }
 
-// piSafeErrorText bounds and sanitizes one provider error for a user-facing
-// control result. Known session paths are redacted and control characters are
-// removed so unrelated session content never reaches a command response.
-func piSafeErrorText(err error, sensitive ...string) string {
-	text := err.Error()
-	for _, value := range sensitive {
-		if value != "" {
-			text = strings.ReplaceAll(text, value, "<session>")
-		}
+// piControlError preserves the original cause for errors.Is while presenting
+// a bounded, sanitized message.
+type piControlError struct {
+	message string
+	cause   error
+}
+
+func (e *piControlError) Error() string { return e.message }
+func (e *piControlError) Unwrap() error { return e.cause }
+
+// piSafeControlError sanitizes one control-operation error so session paths
+// and other sensitive values never leave the adapter toward a user reply.
+func piSafeControlError(err error, sensitive ...string) error {
+	if err == nil {
+		return nil
 	}
-	text = strings.Map(func(r rune) rune {
-		switch {
-		case r == '\n' || r == '\r' || r == '\t':
-			return ' '
-		case r < 0x20 || r == 0x7f:
-			return -1
-		default:
-			return r
-		}
-	}, text)
-	text = strings.Join(strings.Fields(text), " ")
-	if runes := []rune(text); len(runes) > piControlErrorMaxRunes {
-		text = string(runes[:piControlErrorMaxRunes]) + "..."
+	return &piControlError{message: SafeControlErrorText(err, sensitive...), cause: err}
+}
+
+// piControlSensitivePaths lists adapter-owned locations that must never
+// appear in a user-facing control error.
+func (p *Pi) piControlSensitivePaths(cfg HarnessConfig) []string {
+	values := []string{cfg.Cwd, cfg.SessionsFile, p.sessionDirectory(cfg)}
+	if cfg.SessionsFile != "" {
+		values = append(values, filepath.Dir(cfg.SessionsFile))
 	}
-	return text
+	return values
 }

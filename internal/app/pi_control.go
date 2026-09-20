@@ -16,9 +16,6 @@ import (
 // subcommand; every `/pi` surface returns it unchanged.
 const piCommandUsage = "Usage: /pi session | /pi compact [instructions] | /pi import <full-session-id>"
 
-// piControlMaxInstructions bounds one custom compaction instruction set.
-const piControlMaxInstructions = 4096
-
 const (
 	piControlsUnavailable = "Pi session controls are available only in the local TUI and private Telegram conversations."
 	piControlsUnsupported = "The active coding harness does not provide Pi session controls."
@@ -155,7 +152,7 @@ func (s *Service) piSessionCommand(message core.Message, emit core.Emit) error {
 		if errors.Is(err, harness.ErrSessionControlsUnsupported) {
 			return s.localReply(message, piControlsUnsupported, emit)
 		}
-		return s.localReply(message, "Cannot inspect the Pi session: "+err.Error(), emit)
+		return s.piControlFailure(message, "Cannot inspect the Pi session: ", err, emit)
 	}
 	if !found {
 		return s.localReply(message, "No Pi session exists for this conversation yet. The first ordinary prompt creates one.", emit)
@@ -164,8 +161,8 @@ func (s *Service) piSessionCommand(message core.Message, emit core.Emit) error {
 }
 
 func (s *Service) piCompactCommand(ctx context.Context, message core.Message, instructions string, emit core.Emit) error {
-	if utf8.RuneCountInString(instructions) > piControlMaxInstructions {
-		return s.localReply(message, fmt.Sprintf("Custom compaction instructions are too long (maximum %d characters).", piControlMaxInstructions), emit)
+	if utf8.RuneCountInString(instructions) > harness.SessionCompactMaxInstructions {
+		return s.localReply(message, fmt.Sprintf("Custom compaction instructions are too long (maximum %d characters).", harness.SessionCompactMaxInstructions), emit)
 	}
 	compactor, ok := s.Harness.(harness.SessionCompactor)
 	if !ok {
@@ -176,7 +173,7 @@ func (s *Service) piCompactCommand(ctx context.Context, message core.Message, in
 		if errors.Is(err, harness.ErrSessionControlsUnsupported) {
 			return s.localReply(message, piControlsUnsupported, emit)
 		}
-		return s.localReply(message, "Cannot compact the Pi session: "+err.Error(), emit)
+		return s.piControlFailure(message, "Cannot compact the Pi session: ", err, emit)
 	}
 	return s.localReply(message, piCompactReply(result), emit)
 }
@@ -191,9 +188,23 @@ func (s *Service) piImportCommand(ctx context.Context, message core.Message, ses
 		if errors.Is(err, harness.ErrSessionControlsUnsupported) {
 			return s.localReply(message, piControlsUnsupported, emit)
 		}
-		return s.localReply(message, "Cannot import the Pi session: "+err.Error(), emit)
+		return s.piControlFailure(message, "Cannot import the Pi session: ", err, emit)
 	}
 	return s.localReply(message, "Imported Pi session `"+info.ID+"`. This conversation now forks that session inside Spynel; the direct Pi session was not modified. Use `/clear` before importing a different session.", emit)
+}
+
+// piControlFailure bounds and sanitizes one adapter error before it becomes a
+// local `/pi` reply, so provider prose can never leak workspace or session
+// paths, credentials, or control characters. The optional session path is
+// collected only to redact it from the reply.
+func (s *Service) piControlFailure(message core.Message, prefix string, err error, emit core.Emit) error {
+	sensitive := []string{s.Config.Root, s.Config.StatePath()}
+	if inspector, ok := s.Harness.(harness.SessionInspector); ok {
+		if info, found, inspectErr := inspector.SessionInfo(sessionKey(message)); inspectErr == nil && found {
+			sensitive = append(sensitive, info.Path)
+		}
+	}
+	return s.localReply(message, prefix+harness.SafeControlErrorText(err, sensitive...), emit)
 }
 
 // piSessionReply renders the full session identity plus a shell-safe command

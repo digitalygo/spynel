@@ -329,6 +329,62 @@ done:
 	}
 }
 
+func TestPiCompactionEventsRemainStatusOnly(t *testing.T) {
+	command, root, _ := portableHarnessFixture(t, "pi-compaction-events")
+	pi, err := NewPi(HarnessConfig{Command: command, Cwd: root, SessionsFile: filepath.Join(root, "sessions.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pi.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer pi.Close()
+	var mu sync.Mutex
+	var events []core.Event
+	done := make(chan core.Event, 1)
+	if _, _, err := pi.Send(ctx, "chat", "compact during turn", func(event core.Event) {
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+		if event.Done {
+			done <- event
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var final core.Event
+	select {
+	case final = <-done:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the compacting Pi turn")
+	}
+	if final.Kind != core.EventFinal || final.Text != "hello world" {
+		t.Fatalf("compaction-event final = %#v", final)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	statuses := 0
+	for _, event := range events {
+		switch {
+		case strings.Contains(event.Text, "Pi is compacting"):
+			if event.Done || event.Kind != core.EventStatus {
+				t.Fatalf("compaction_start was terminal: %#v", event)
+			}
+			statuses++
+		case strings.Contains(event.Text, "finished compacting"):
+			if event.Done || event.Kind != core.EventStatus {
+				t.Fatalf("compaction_end was terminal: %#v", event)
+			}
+			statuses++
+		}
+	}
+	if statuses != 2 {
+		t.Fatalf("compaction status events = %d, want 2: %#v", statuses, events)
+	}
+}
+
 func TestPiLoadsOrdinaryUserResourcesWithoutSuppressionFlags(t *testing.T) {
 	command, root, logPath := portableHarnessFixture(t, "pi-lifecycle")
 	pi, err := NewPi(HarnessConfig{Command: command, Cwd: root, Sandbox: "read-only", SessionsFile: filepath.Join(root, "sessions.json")})

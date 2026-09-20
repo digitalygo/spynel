@@ -170,7 +170,7 @@ func runHarnessFixture(mode string) int {
 		return runCodexFixture(mode)
 	case "claude-stream", "claude-steer", "claude-text", "claude-interrupt", "claude-help-missing-flag", "claude-init-changed-event", "claude-terminal-error", "claude-result-nonzero":
 		return runClaudeFixture(mode)
-	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate":
+	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath":
 		return runPiFixture(mode)
 	case "acp-lifecycle", "acp-interrupt", "acp-version-mismatch", "acp-session-error":
 		return runACPFixture(mode)
@@ -220,6 +220,10 @@ func runPiFixture(mode string) int {
 		if sessionDir != "" {
 			sessionFile = filepath.Join(sessionDir, sessionID+".jsonl")
 		}
+		if mode == "pi-import-preexisting" {
+			sessionID = "preexisting-session"
+			sessionFile = filepath.Join(sessionDir, "pi-fixture-preexisting.jsonl")
+		}
 	}
 	if sessionArg != "" {
 		sessionFile = sessionArg
@@ -254,7 +258,19 @@ func runPiFixture(mode string) int {
 		appendFixtureLog(map[string]any{"kind": "request", "method": message.Type, "params": json.RawMessage(scanner.Bytes())})
 		switch message.Type {
 		case "get_state":
-			writeFixturePiSession(sessionFile, sessionID, mustGetwd())
+			// pi-import-nopath simulates a provider that creates the fork file
+			// and then exits negotiation without ever reporting its path.
+			if mode == "pi-import-nopath" && forkPath != "" {
+				writeFixturePiSession(sessionFile, sessionID, mustGetwd())
+				respond(message, map[string]any{"isStreaming": false})
+				break
+			}
+			// pi-import-preexisting already holds a valid header at the reported
+			// path; report it without rewriting so the adapter must prove the path
+			// did not exist before this import before it may clean it up.
+			if mode != "pi-import-preexisting" || forkPath == "" {
+				writeFixturePiSession(sessionFile, sessionID, mustGetwd())
+			}
 			if mode == "pi-import-changing" && forkPath != "" {
 				// The direct session mutates during the fork window so the adapter
 				// must fail closed instead of persisting a stale fork.
@@ -312,6 +328,17 @@ func runPiFixture(mode string) int {
 				write(map[string]any{"type": "extension_ui_request", "id": "ui-2", "method": "notify", "message": "fire-and-forget"})
 			} else if mode == "pi-steer" {
 				delta("first")
+			} else if mode == "pi-compaction-events" {
+				write(map[string]any{"type": "compaction_start"})
+				delta("hello ")
+				write(map[string]any{"type": "compaction_end"})
+				delta("world")
+				messageEnd("hello world", "stop")
+				write(map[string]any{"type": "agent_end"})
+				go func() {
+					time.Sleep(80 * time.Millisecond)
+					write(map[string]any{"type": "agent_settled"})
+				}()
 			} else if mode == "pi-interrupt" {
 				delta("working")
 			} else {
