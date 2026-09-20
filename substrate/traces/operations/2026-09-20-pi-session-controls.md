@@ -1,6 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-20
+updated_at: 2026-09-20
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -34,6 +35,7 @@ supporting_docs:
   - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md
   - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md
   - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/compaction.md
+  - https://github.com/digitalygo/spynel/releases/tag/v1.3.0
 ---
 
 # Pi session controls
@@ -122,3 +124,35 @@ The intended release target is `v1.3.0`. Publication is pending the standard rel
 - [Coding harness compatibility](../../../docs/harness-compatibility.md)
 - [Local Pi configuration](2026-09-19-local-pi-configuration.md)
 - [Telegram topic conversations and bounded rich-text replies](2026-09-20-telegram-topic-rich-text.md)
+
+## Update 2026-09-20: v1.3.0 publication
+
+### Summary of changes
+
+The pending state in "Release and publication status" above is resolved: `v1.3.0` is released at tag target `b8ce0b6a12906324e948501e5280caad6afb74f5`, the stable non-prerelease GitHub Release publishes four native archives plus `checksums.txt`, `@digitalygo/spynel@1.3.0` is the npm `latest` package with SLSA provenance v1 through Trusted Publishing, and the live npm-managed home service runs that release. No real-provider compaction or import canary and no Telegram session-notice canary were run; the Pi session-control behavior remains evidenced by the automated fixtures and race tests, the smoke checks, the native packaging evidence, and the release gates recorded below.
+
+### Technical reasoning
+
+The release reused the existing gates instead of adding publication steps. A manual `workflow_dispatch` validation run on the exact release commit (run 35515300385) passed the `verify` job and all four native build jobs for Linux amd64, Linux arm64, macOS amd64, and macOS arm64 while the `publish` job remained skipped, keeping validation separate from publication. Publishing the GitHub Release then triggered run 35515821891, which passed `verify`, the same four native jobs, and `publish`. The publish job attached four native archives plus `checksums.txt` and released npm through GitHub Actions Trusted Publishing, so no npm token or other long-lived publication credential was used. The local native package for `v1.3.0` passed, and this record's documentation, DOX, and compiled agent documentation pass, originally recorded as uncommitted, is committed as the `v1.3.0` tag target itself.
+
+One environment condition repeated from the `v1.2.0` rollout without producing a release defect. The updater's first attempt hit the known read-only local Linuxbrew npmrc `0444` `EACCES`; the official updater succeeded after a temporary owner-write, the original `0444` mode and hash were restored, and no persistent permission change remains. The Node.js 20 deprecation annotation on the release workflow's artifact action was informational and non-blocking.
+
+### Impact assessment
+
+- [GitHub Release v1.3.0](https://github.com/digitalygo/spynel/releases/tag/v1.3.0) is public, stable, and non-prerelease at `b8ce0b6a12906324e948501e5280caad6afb74f5`, with `checksums.txt` and the four supported native archives for Linux amd64, Linux arm64, macOS amd64, and macOS arm64.
+- npm `latest` resolves to `@digitalygo/spynel@1.3.0` with the `spynel` bin mapping, Digitalygo repository metadata, and a SLSA provenance v1 attestation produced through Trusted Publishing without an npm token.
+- The live npm-managed home service runs `1.3.0` with Telegram and Pi connected and an inactive turn, inherits model, reasoning, and service settings, keeps task reviews at `never`, reports `Current` and `Latest` both `1.3.0` with no available update, and exposes `/pi` in its compiled documentation.
+- The Pi session controls documented in this record are part of the published release, and the earlier note that the documentation pass was left unstaged no longer describes the repository state.
+- No live real-provider compaction or import canary and no Telegram session-notice canary are claimed; the automated fixtures, race tests, smoke checks, native packaging evidence, and release gates remain the behavioral evidence.
+
+### Validation steps
+
+- `git rev-list -n1 v1.3.0` resolves the tag to `b8ce0b6a12906324e948501e5280caad6afb74f5`.
+- Manual validation run 35515300385 completed successfully: `verify` passed, all four native build jobs passed, `publish` was skipped.
+- Release run 35515821891 completed successfully: `verify` passed, all four native build jobs passed, `publish` passed.
+- Release inspection confirmed a stable non-prerelease `v1.3.0` release with `checksums.txt` and the four supported native archives for Linux amd64, Linux arm64, macOS amd64, and macOS arm64.
+- Registry inspection confirmed `latest` at `1.3.0`, the expected `spynel` bin mapping and Digitalygo repository metadata, and the SLSA provenance v1 predicate with no npm token used for publication.
+- The local native package for `1.3.0` passed, and a clean-prefix installation of exactly `@digitalygo/spynel@1.3.0` reported `spynel 1.3.0`.
+- The live npm-managed home service updated to `1.3.0`; `spynel status --json` reports Telegram and Pi connected with an inactive turn, inherited model, reasoning, and service settings, and task reviews `never`; `spynel update --json check` reports `Current` and `Latest` both `1.3.0`; `/pi` appears in the compiled docs.
+- The updater's first Linuxbrew attempt hit the read-only npmrc `0444` `EACCES`; the official updater succeeded after a temporary owner-write; the original `0444` mode and hash were restored with no persistent permission change.
+- `scripts/dev.sh dox` and `git diff --check` passed for this documentation-only update.
