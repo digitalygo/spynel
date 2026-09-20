@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -169,7 +170,7 @@ func runHarnessFixture(mode string) int {
 		return runCodexFixture(mode)
 	case "claude-stream", "claude-steer", "claude-text", "claude-interrupt", "claude-help-missing-flag", "claude-init-changed-event", "claude-terminal-error", "claude-result-nonzero":
 		return runClaudeFixture(mode)
-	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui":
+	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate":
 		return runPiFixture(mode)
 	case "acp-lifecycle", "acp-interrupt", "acp-version-mismatch", "acp-session-error":
 		return runACPFixture(mode)
@@ -191,13 +192,39 @@ func runPiFixture(mode string) int {
 		Provider string          `json:"provider"`
 		ModelID  string          `json:"modelId"`
 	}
+	args := os.Args[1:]
 	currentModel := "model-a"
 	if mode == "pi-off-default" {
 		currentModel = "model-off"
 	}
-	for index, arg := range os.Args[1:] {
-		if arg == "--model" && index+2 <= len(os.Args[1:]) {
-			currentModel = strings.TrimPrefix(os.Args[index+2], "fixture/")
+	sessionDir, forkPath, sessionArg := "", "", ""
+	for index, arg := range args {
+		if index+1 >= len(args) {
+			continue
+		}
+		switch arg {
+		case "--model":
+			currentModel = strings.TrimPrefix(args[index+1], "fixture/")
+		case "--session-dir":
+			sessionDir = args[index+1]
+		case "--fork":
+			forkPath = args[index+1]
+		case "--session":
+			sessionArg = args[index+1]
+		}
+	}
+	sessionID := "pi-session"
+	sessionFile := filepath.Join(mustGetwd(), "pi-fixture-session.jsonl")
+	if forkPath != "" {
+		sessionID = "pi-imported-session"
+		if sessionDir != "" {
+			sessionFile = filepath.Join(sessionDir, sessionID+".jsonl")
+		}
+	}
+	if sessionArg != "" {
+		sessionFile = sessionArg
+		if headerID := readFixturePiSessionID(sessionArg); headerID != "" {
+			sessionID = headerID
 		}
 	}
 	var outputMu sync.Mutex
@@ -227,8 +254,16 @@ func runPiFixture(mode string) int {
 		appendFixtureLog(map[string]any{"kind": "request", "method": message.Type, "params": json.RawMessage(scanner.Bytes())})
 		switch message.Type {
 		case "get_state":
-			sessionFile := filepath.Join(mustGetwd(), "pi-fixture-session.jsonl")
-			_ = os.WriteFile(sessionFile, []byte("{}\n"), 0o600)
+			writeFixturePiSession(sessionFile, sessionID, mustGetwd())
+			if mode == "pi-import-changing" && forkPath != "" {
+				// The direct session mutates during the fork window so the adapter
+				// must fail closed instead of persisting a stale fork.
+				file, err := os.OpenFile(forkPath, os.O_APPEND|os.O_WRONLY, 0o600)
+				if err == nil {
+					_, _ = file.WriteString("{\"type\":\"custom\",\"id\":\"mutation\",\"parentId\":null,\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"customType\":\"fixture\"}\n")
+					_ = file.Close()
+				}
+			}
 			if mode == "pi-state-missing-session" {
 				respond(message, map[string]any{"isStreaming": false})
 			} else {
@@ -238,8 +273,14 @@ func runPiFixture(mode string) int {
 				} else if currentModel == "model-max" {
 					thinkingLevel = "max"
 				}
-				respond(message, map[string]any{"sessionId": "pi-session", "sessionFile": sessionFile, "isStreaming": false, "thinkingLevel": thinkingLevel, "model": map[string]any{"id": currentModel, "provider": "fixture"}})
+				respond(message, map[string]any{"sessionId": sessionID, "sessionFile": sessionFile, "isStreaming": false, "thinkingLevel": thinkingLevel, "model": map[string]any{"id": currentModel, "provider": "fixture"}})
 			}
+		case "compact":
+			data := map[string]any{"summary": "fixture summary", "firstKeptEntryId": "entry-1", "tokensBefore": 150000, "estimatedTokensAfter": 32000}
+			if mode == "pi-compact-without-estimate" {
+				delete(data, "estimatedTokensAfter")
+			}
+			respond(message, data)
 		case "set_steering_mode", "set_follow_up_mode":
 			respond(message, map[string]any{})
 		case "get_available_models":
@@ -415,6 +456,39 @@ func runACPFixture(mode string) int {
 func mustGetwd() string {
 	cwd, _ := os.Getwd()
 	return cwd
+}
+
+// writeFixturePiSession materializes one supported Pi session header so the
+// adapter can validate a real file on disk during session-control tests.
+func writeFixturePiSession(path, id, cwd string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	header, err := json.Marshal(map[string]any{"type": "session", "version": 3, "id": id, "timestamp": "2026-01-01T00:00:00.000Z", "cwd": cwd})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, append(header, '\n'), 0o600)
+}
+
+// readFixturePiSessionID reads one bounded first line for session resume
+// simulation; an unreadable or malformed header reports no identity.
+func readFixturePiSessionID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	line := data
+	if index := bytes.IndexByte(data, '\n'); index >= 0 {
+		line = data[:index]
+	}
+	var header struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(line, &header) != nil {
+		return ""
+	}
+	return header.ID
 }
 
 func appendFixtureLog(value any) {

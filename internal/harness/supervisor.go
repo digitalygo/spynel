@@ -830,6 +830,63 @@ func (s *Supervisor) IsActive(key string) bool {
 	return active
 }
 
+// SessionInfo forwards process-free session inspection to the active
+// harness. A harness without the optional capability reports an explicit
+// unsupported error instead of a fabricated session, and an unavailable
+// provider still allows inspection through a freshly constructed adapter
+// because constructing one only loads its durable session map.
+func (s *Supervisor) SessionInfo(key string) (SessionInfo, bool, error) {
+	s.mu.RLock()
+	target := s.current
+	cfg := s.config
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		return SessionInfo{}, false, errors.New("harness supervisor is closed")
+	}
+	if target == nil {
+		adapter, err := s.registry.Create(cfg)
+		if err != nil {
+			return SessionInfo{}, false, err
+		}
+		defer adapter.Close()
+		target = adapter
+	}
+	inspector, ok := target.(SessionInspector)
+	if !ok {
+		return SessionInfo{}, false, ErrSessionControlsUnsupported
+	}
+	return inspector.SessionInfo(key)
+}
+
+// CompactSession forwards one idle-only manual compaction request to the
+// active harness with the same unsupported boundary as SessionInfo.
+func (s *Supervisor) CompactSession(ctx context.Context, key, instructions string) (CompactResult, error) {
+	target, err := s.target()
+	if err != nil {
+		return CompactResult{}, err
+	}
+	compactor, ok := target.(SessionCompactor)
+	if !ok {
+		return CompactResult{}, ErrSessionControlsUnsupported
+	}
+	return compactor.CompactSession(ctx, key, instructions)
+}
+
+// ImportSession forwards one idle-only external session import to the active
+// harness with the same unsupported boundary as SessionInfo.
+func (s *Supervisor) ImportSession(ctx context.Context, key, sessionID string) (SessionInfo, error) {
+	target, err := s.target()
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	importer, ok := target.(SessionImporter)
+	if !ok {
+		return SessionInfo{}, ErrSessionControlsUnsupported
+	}
+	return importer.ImportSession(ctx, key, sessionID)
+}
+
 func (s *Supervisor) Close() error {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()

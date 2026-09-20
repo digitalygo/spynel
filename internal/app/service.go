@@ -78,6 +78,8 @@ type Service struct {
 	streamMu               sync.Mutex
 	admissionMu            sync.Mutex
 	admissions             map[string]bool
+	piNoticeMu             sync.Mutex
+	piNoticeState          map[string]piSessionDisclosure
 	liveTUIMu              sync.Mutex
 	liveTUI                map[string]map[string]time.Time
 	chatActivityMu         sync.Mutex
@@ -155,6 +157,7 @@ func NewWithRuntime(cfg config.Config, target harness.Harness, runtime *Runtime)
 		recoveryExecution:     map[string]*recoveryExecution{},
 		recoveryIntake:        map[string]int{},
 		conversationActivity:  map[string]int{},
+		piNoticeState:         map[string]piSessionDisclosure{},
 	}
 	manager.Cleanup = service.runAutomaticCleanup
 	manager.Log = func(message string) { runtime.LogEvent("info", "orchestrator", "lifecycle", message) }
@@ -630,6 +633,10 @@ func (s *Service) dispatchHarnessPrompt(ctx context.Context, message core.Messag
 	activity := newChatActivityEmitter(emit)
 	s.trackChatActivity(jobID, activity)
 	activity.start()
+	priorPiSession := ""
+	if piControlSurface(message) {
+		priorPiSession = s.currentPiSessionID(message)
+	}
 	wrapped := s.wrapEmit(message, jobID, activity.emit)
 	var threadID string
 	var steered bool
@@ -650,6 +657,7 @@ func (s *Service) dispatchHarnessPrompt(ctx context.Context, message core.Messag
 		}
 		return err
 	}
+	s.markPiSessionDisclosure(message, priorPiSession, threadID)
 	actualAdmission := "new"
 	if steered {
 		actualAdmission = "steered"
@@ -738,6 +746,11 @@ func (s *Service) chatPrompt(message core.Message) (string, error) {
 func (s *Service) wrapEmit(message core.Message, jobID int, downstream core.Emit) core.Emit {
 	var terminalMu sync.Mutex
 	terminalDelivered := false
+	priorPiSession := ""
+	if piControlSurface(message) {
+		priorPiSession = s.currentPiSessionID(message)
+	}
+	piNoticeSent := false
 	return func(event core.Event) {
 		terminal := event.Done && !event.Continues && (event.Kind == core.EventFinal || event.Kind == core.EventError)
 		if terminal {
@@ -859,6 +872,21 @@ func (s *Service) wrapEmit(message core.Message, jobID int, downstream core.Emit
 		// Capture after extension and outbound-media processing so validated
 		// attachment paths and objects never enter the archive.
 		s.Runtime.RecordJobEvent(jobID, event)
+		// The new-session disclosure is a downstream decoration only: durable
+		// history, hook payloads, and job archives keep the provider response
+		// unaffected, and prepending keeps it outside Telegram's tail
+		// truncation. Only non-continuing finals are decorated because remote
+		// channels suppress intermediate continuations.
+		if event.Kind == core.EventFinal && !event.Continues && !piNoticeSent {
+			piNoticeSent = true
+			if notice := s.takePiSessionNotice(message, priorPiSession); notice != "" {
+				event.Text = notice + "\n\n" + event.Text
+				if event.FinalText != nil {
+					final := notice + "\n\n" + *event.FinalText
+					event.FinalText = &final
+				}
+			}
+		}
 		if downstream != nil {
 			downstream(event)
 		}
@@ -930,6 +958,8 @@ func (s *Service) handleCommand(ctx context.Context, message core.Message, emit 
 		return s.localReply(message, status, emit)
 	case "primary":
 		return s.primaryCommand(message, emit)
+	case "pi":
+		return s.piCommand(ctx, message, remainder, emit)
 	case "config":
 		return s.configurationCommand(message, "config", remainder, emit)
 	case "telegram":
@@ -1892,6 +1922,10 @@ var slashCommands = []core.SlashCommand{
 	{Value: "/title ", Usage: "/title <name>", Description: "Rename and persist this TUI window"},
 	{Value: "/new", Usage: "/new", Description: "Start a distinct TUI conversation and preserve this one"},
 	{Value: "/stop", Usage: "/stop", Description: "Stop the active execution for this conversation"},
+	{Value: "/pi", Usage: "/pi session | /pi compact [instructions] | /pi import <full-session-id>", Description: "Inspect or manage the Pi session from the TUI or a private Telegram chat"},
+	{Value: "/pi session", Usage: "/pi session", Description: "Show the full Pi session ID and a safe direct Pi command"},
+	{Value: "/pi compact ", Usage: "/pi compact [instructions]", Description: "Compact this conversation's Pi session context"},
+	{Value: "/pi import ", Usage: "/pi import <full-session-id>", Description: "Fork an existing direct Pi session into this conversation"},
 	{Value: "/restart", Usage: "/restart", Description: "Restart Spynel and restore saved state"},
 	{Value: "/update", Usage: "/update", Description: "Update and restart all instances of this installation"},
 	{Value: "/update check", Usage: "/update check", Description: "Check versions without updating or restarting"},
@@ -1955,7 +1989,7 @@ var helpTopics = []struct {
 	{
 		name:        "channels",
 		description: "The TUI, Telegram, and WhatsApp",
-		body:        "# Channels\n\nThe TUI, each Telegram chat, and each WhatsApp chat keep independent durable histories and harness threads. All channels share the application slash commands and Markdown-aware responses.\n\nUse `/status` to inspect shared connection, runtime, harness, instance, and orchestrator indicators. From an idle local TUI, `/primary` safely hands workspace ownership to that TUI instance. Use `/history` to locate the current conversation's history file, `/clear` to erase that history and discard its harness thread, `/stop` to interrupt its active execution, and `/new` to switch the TUI to a distinct conversation while preserving the prior one for `/resume`. `/restart` acknowledges the request, cleanly stops the current runtime, and relaunches Spynel with saved configuration and histories intact. `/update` updates the owning installation and restarts all its running instances across workspaces. `/update check` only checks versions, with a ten-second deadline. The shell command `spynel killall` stops all running Spynel instances, preserving saved workspace state and future autostart registrations. `/log` shows bounded runtime diagnostics. `/jobs` lists active executions and `/jobs recent` lists archived executions by the same numeric reference; `/job info <number>` and `/job output <number>` inspect bounded metadata or captured output. `/tasks` and `/goals` list open durable work by default. `/job message <number> <text>` sends nonterminal guidance through the existing job session, `/job ping <number>` requests a durable progress update, and `/job kill <number>` stops one live job.",
+		body:        "# Channels\n\nThe TUI, each Telegram chat, and each WhatsApp chat keep independent durable histories and harness threads. All channels share the application slash commands and Markdown-aware responses.\n\nUse `/status` to inspect shared connection, runtime, harness, instance, and orchestrator indicators. From an idle local TUI, `/primary` safely hands workspace ownership to that TUI instance. Use `/history` to locate the current conversation's history file, `/clear` to erase that history and discard its harness thread, `/stop` to interrupt its active execution, and `/new` to switch the TUI to a distinct conversation while preserving the prior one for `/resume`. `/restart` acknowledges the request, cleanly stops the current runtime, and relaunches Spynel with saved configuration and histories intact. `/update` updates the owning installation and restarts all its running instances across workspaces. `/update check` only checks versions, with a ten-second deadline. The shell command `spynel killall` stops all running Spynel instances, preserving saved workspace state and future autostart registrations. `/log` shows bounded runtime diagnostics. `/jobs` lists active executions and `/jobs recent` lists archived executions by the same numeric reference; `/job info <number>` and `/job output <number>` inspect bounded metadata or captured output. `/tasks` and `/goals` list open durable work by default. `/job message <number> <text>` sends nonterminal guidance through the existing job session, `/job ping <number>` requests a durable progress update, and `/job kill <number>` stops one live job. Pi session controls are available only in the TUI and private Telegram conversations: `/pi session` shows the full Pi session ID and a shell-safe direct Pi command, `/pi compact [instructions]` compacts the existing idle session, and `/pi import <full-session-id>` forks a validated direct Pi session into Spynel. `/clear` resets this conversation's session before a different import.",
 	},
 	{
 		name:        "workflows",

@@ -132,6 +132,51 @@ type Availability interface {
 	ReadyEvents() <-chan struct{}
 }
 
+// SessionInfo is one provider-neutral conversation session identity. ID and
+// Path are sensitive provider values that callers may only reveal on explicit
+// session-control surfaces; Command is the configured executable used to
+// compose a direct provider command.
+type SessionInfo struct {
+	ID      string
+	Path    string
+	Command string
+}
+
+// CompactResult reports bounded token accounting for one explicit manual
+// compaction. TokensAfterKnown distinguishes a reported estimate from an
+// unavailable one.
+type CompactResult struct {
+	TokensBefore     int
+	TokensAfter      int
+	TokensAfterKnown bool
+}
+
+// SessionInspector is an optional capability that reports the current
+// conversation session without starting a provider process. Implementations
+// return ok=false when the conversation has no session yet.
+type SessionInspector interface {
+	SessionInfo(key string) (info SessionInfo, ok bool, err error)
+}
+
+// ErrSessionControlsUnsupported reports that the active harness does not
+// implement the optional Pi session-control capabilities. Callers map it to
+// their own user-facing unsupported guidance.
+var ErrSessionControlsUnsupported = errors.New("the active harness does not provide Pi session controls")
+
+// SessionCompactor is an optional capability that compacts an existing
+// conversation session. Implementations resume only an existing persisted
+// session and never create a new one.
+type SessionCompactor interface {
+	CompactSession(ctx context.Context, key, instructions string) (CompactResult, error)
+}
+
+// SessionImporter is an optional capability that forks one validated external
+// provider session into the workspace session store without mutating or
+// sharing the source file.
+type SessionImporter interface {
+	ImportSession(ctx context.Context, key, sessionID string) (SessionInfo, error)
+}
+
 // FollowUpMode describes how a harness accepts another user message while a
 // turn is active. Harnesses that do not implement FollowUpProvider are queued
 // conservatively by Supervisor, which makes a basic adapter safe by default.

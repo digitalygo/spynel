@@ -513,31 +513,32 @@ func (p *Pi) ensureProcess(ctx context.Context, key, model, effort string) (*piP
 	return process, nil
 }
 
+// sessionDirectory is the workspace-local store for Spynel conversation Pi
+// sessions. It lives beside the harness session map so restart recovery and
+// import cleanup share one exact path.
+func (p *Pi) sessionDirectory(cfg HarnessConfig) string {
+	if cfg.SessionsFile == "" {
+		return filepath.Join(cfg.Cwd, ".spynel", "runtime", "pi-sessions")
+	}
+	return filepath.Join(filepath.Dir(cfg.SessionsFile), "pi-sessions")
+}
+
 func (p *Pi) startProcess(ctx context.Context, key string, session piSession, ephemeral bool, model, effort string) (*piProcess, error) {
+	return p.startProcessValidated(ctx, key, session, ephemeral, model, effort, nil)
+}
+
+func (p *Pi) startProcessValidated(ctx context.Context, key string, session piSession, ephemeral bool, model, effort string, validate func(piState) error) (*piProcess, error) {
 	p.mu.Lock()
-	baseContext := p.ctx
-	closed := p.closed
 	cfg := p.config
+	p.mu.Unlock()
 	cfg.Model = model
 	cfg.Effort = effort
-	p.mu.Unlock()
-	if ephemeral {
-		baseContext = ctx
-	}
-	if closed || baseContext == nil {
-		return nil, errors.New("Pi harness is not running")
-	}
-	processContext, cancel := context.WithCancel(baseContext)
 	args := []string{"--mode", "rpc"}
 	if ephemeral {
 		args = append(args, "--no-session")
 	} else {
-		sessionDir := filepath.Join(filepath.Dir(cfg.SessionsFile), "pi-sessions")
-		if cfg.SessionsFile == "" {
-			sessionDir = filepath.Join(cfg.Cwd, ".spynel", "runtime", "pi-sessions")
-		}
+		sessionDir := p.sessionDirectory(cfg)
 		if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-			cancel()
 			return nil, err
 		}
 		args = append(args, "--session-dir", sessionDir)
@@ -547,6 +548,27 @@ func (p *Pi) startProcess(ctx context.Context, key string, session piSession, ep
 			}
 		}
 	}
+	return p.startProcessArgs(ctx, key, args, cfg, !ephemeral, !ephemeral, validate)
+}
+
+// startProcessArgs launches one Pi RPC process from explicit arguments.
+// requireSession enforces a persisted session identity from get_state, and
+// persist records that identity in the durable session map before returning.
+// validate runs after negotiation and before persistence so control
+// operations can fail closed without storing an unexpected session.
+func (p *Pi) startProcessArgs(ctx context.Context, key string, args []string, cfg HarnessConfig, requireSession, persist bool, validate func(piState) error) (*piProcess, error) {
+	p.mu.Lock()
+	baseContext := p.ctx
+	closed := p.closed
+	p.mu.Unlock()
+	if !requireSession {
+		// Ephemeral capability discovery uses the caller context.
+		baseContext = ctx
+	}
+	if closed || baseContext == nil {
+		return nil, errors.New("Pi harness is not running")
+	}
+	processContext, cancel := context.WithCancel(baseContext)
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
@@ -584,9 +606,15 @@ func (p *Pi) startProcess(ctx context.Context, key string, session piSession, ep
 		return nil, fmt.Errorf("Pi executable %q failed RPC get_state negotiation: %w", cfg.Command, err)
 	}
 	var state piState
-	if err := json.Unmarshal(data, &state); err != nil || (!ephemeral && (state.SessionID == "" || state.SessionFile == "")) {
+	if err := json.Unmarshal(data, &state); err != nil || (requireSession && (state.SessionID == "" || state.SessionFile == "")) {
 		process.close()
 		return nil, fmt.Errorf("Pi executable %q returned an incompatible get_state result with missing sessionId or sessionFile", cfg.Command)
+	}
+	if validate != nil {
+		if err := validate(state); err != nil {
+			process.close()
+			return nil, err
+		}
 	}
 	process.mu.Lock()
 	process.session = piSession{ID: state.SessionID, Path: state.SessionFile, Policy: piSessionPolicy(cfg)}
@@ -601,7 +629,7 @@ func (p *Pi) startProcess(ctx context.Context, key string, session piSession, ep
 		process.close()
 		return nil, fmt.Errorf("configure Pi follow-up queue: %w", err)
 	}
-	if !ephemeral {
+	if persist {
 		p.mu.Lock()
 		p.sessions[key] = process.session
 		err = p.saveSessionsLocked()
@@ -800,6 +828,14 @@ func (process *piProcess) handleEvent(kind string, event map[string]json.RawMess
 	case "auto_retry_start", "summarization_retry_scheduled":
 		turn.emitEvent(core.Event{Kind: core.EventStatus, Text: "Pi is retrying", ThreadID: process.session.ID,
 			Execution: &core.ExecutionStatus{State: "reconnecting"}})
+	case "compaction_start":
+		// Compaction is a context-management phase, never an agent turn: it
+		// only surfaces provider-neutral status while a turn already owns the
+		// emitter, and an idle manual compact reports through its RPC result.
+		turn.emitEvent(core.Event{Kind: core.EventStatus, Text: "Pi is compacting context", ThreadID: process.session.ID,
+			Execution: &core.ExecutionStatus{State: "running"}})
+	case "compaction_end":
+		turn.emitEvent(core.Event{Kind: core.EventStatus, Text: "Pi finished compacting context", ThreadID: process.session.ID})
 	case "agent_settled":
 		process.finishTurn(turn)
 	}

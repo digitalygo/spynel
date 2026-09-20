@@ -1101,3 +1101,135 @@ func TestUnavailableSupervisorStillClearsDurableAdapterSession(t *testing.T) {
 		t.Fatalf("durable reset adapter = keys %#v, closed %t", resetter.resetKeys, resetter.closed)
 	}
 }
+
+type sessionControlSupervisorHarness struct {
+	*supervisorHarness
+	info       SessionInfo
+	found      bool
+	compact    CompactResult
+	imported   SessionInfo
+	lastKey    string
+	lastDetail string
+}
+
+func (r *sessionControlSupervisorHarness) SessionInfo(key string) (SessionInfo, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastKey = key
+	return r.info, r.found, nil
+}
+
+func (r *sessionControlSupervisorHarness) CompactSession(_ context.Context, key, instructions string) (CompactResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastKey, r.lastDetail = key, instructions
+	return r.compact, nil
+}
+
+func (r *sessionControlSupervisorHarness) ImportSession(_ context.Context, key, sessionID string) (SessionInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastKey, r.lastDetail = key, sessionID
+	return r.imported, nil
+}
+
+func TestSupervisorForwardsPiSessionControls(t *testing.T) {
+	target := &sessionControlSupervisorHarness{
+		supervisorHarness: &supervisorHarness{name: "pi", active: map[string]bool{}, emits: map[string]core.Emit{}},
+		info:              SessionInfo{ID: "session-1", Path: "/tmp/session-1.jsonl", Command: "pi"},
+		found:             true,
+		compact:           CompactResult{TokensBefore: 100, TokensAfter: 20, TokensAfterKnown: true},
+		imported:          SessionInfo{ID: "session-2", Path: "/tmp/session-2.jsonl", Command: "pi"},
+	}
+	registry := NewRegistry()
+	registry.Register("pi", func(HarnessConfig) (Harness, error) { return target, nil })
+	supervisor := NewSupervisor(registry, HarnessConfig{Name: "pi"})
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer supervisor.Close()
+	info, ok, err := supervisor.SessionInfo("chat")
+	if err != nil || !ok || info.ID != "session-1" {
+		t.Fatalf("forwarded SessionInfo = %#v, %t, %v", info, ok, err)
+	}
+	target.mu.Lock()
+	key := target.lastKey
+	target.mu.Unlock()
+	if key != "chat" {
+		t.Fatalf("forwarded SessionInfo key = %q", key)
+	}
+	result, err := supervisor.CompactSession(context.Background(), "chat", "focus")
+	if err != nil || result.TokensBefore != 100 || !result.TokensAfterKnown || result.TokensAfter != 20 {
+		t.Fatalf("forwarded CompactSession = %#v, %v", result, err)
+	}
+	target.mu.Lock()
+	key, detail := target.lastKey, target.lastDetail
+	target.mu.Unlock()
+	if key != "chat" || detail != "focus" {
+		t.Fatalf("forwarded CompactSession = %q, %q", key, detail)
+	}
+	imported, err := supervisor.ImportSession(context.Background(), "chat", "11111111-1111-1111-1111-111111111111")
+	if err != nil || imported.ID != "session-2" {
+		t.Fatalf("forwarded ImportSession = %#v, %v", imported, err)
+	}
+	target.mu.Lock()
+	detail = target.lastDetail
+	target.mu.Unlock()
+	if detail != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("forwarded ImportSession id = %q", detail)
+	}
+}
+
+func TestSupervisorReportsUnsupportedPiSessionControls(t *testing.T) {
+	registry := NewRegistry()
+	target := &supervisorHarness{name: "claude-code", active: map[string]bool{}, emits: map[string]core.Emit{}}
+	registry.Register("claude-code", func(HarnessConfig) (Harness, error) { return target, nil })
+	supervisor := NewSupervisor(registry, HarnessConfig{Name: "claude-code"})
+	// Process-free inspection may construct an adapter for its durable session
+	// map, but a harness without the capability still fails closed.
+	if _, _, err := supervisor.SessionInfo("chat"); err == nil || !strings.Contains(err.Error(), "does not provide Pi session controls") {
+		t.Fatalf("unstarted SessionInfo error = %v", err)
+	}
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := supervisor.SessionInfo("chat"); err == nil || !strings.Contains(err.Error(), "does not provide Pi session controls") {
+		t.Fatalf("started unsupported SessionInfo error = %v", err)
+	}
+	if _, err := supervisor.CompactSession(context.Background(), "chat", ""); err == nil || !strings.Contains(err.Error(), "does not provide Pi session controls") {
+		t.Fatalf("unsupported CompactSession error = %v", err)
+	}
+	if _, err := supervisor.ImportSession(context.Background(), "chat", "11111111-1111-1111-1111-111111111111"); err == nil || !strings.Contains(err.Error(), "does not provide Pi session controls") {
+		t.Fatalf("unsupported ImportSession error = %v", err)
+	}
+	if err := supervisor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := supervisor.SessionInfo("chat"); err == nil || !strings.Contains(err.Error(), "supervisor is closed") {
+		t.Fatalf("closed SessionInfo error = %v", err)
+	}
+}
+
+func TestSupervisorSessionInfoUsesAPersistedAdapterWhenUnavailable(t *testing.T) {
+	registry := NewRegistry()
+	created := 0
+	registry.Register("pi", func(HarnessConfig) (Harness, error) {
+		created++
+		return &sessionControlSupervisorHarness{
+			supervisorHarness: &supervisorHarness{name: "pi", startErr: errors.New("missing executable"), active: map[string]bool{}, emits: map[string]core.Emit{}},
+			info:              SessionInfo{ID: "persisted-session", Path: "/tmp/persisted.jsonl", Command: "pi"},
+			found:             true,
+		}, nil
+	})
+	supervisor := NewSupervisor(registry, HarnessConfig{Name: "pi"})
+	if err := supervisor.Start(context.Background()); err == nil {
+		t.Fatal("unavailable harness unexpectedly started")
+	}
+	info, ok, err := supervisor.SessionInfo("chat")
+	if err != nil || !ok || info.ID != "persisted-session" {
+		t.Fatalf("unavailable SessionInfo = %#v, %t, %v", info, ok, err)
+	}
+	if created != 2 {
+		t.Fatalf("adapter constructions = %d, want one start attempt and one inspection", created)
+	}
+}
