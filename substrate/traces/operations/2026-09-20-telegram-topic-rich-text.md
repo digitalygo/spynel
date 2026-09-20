@@ -1,6 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-20
+updated_at: 2026-09-20
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -30,6 +31,7 @@ supporting_docs:
   - https://core.telegram.org/bots/api
   - https://core.telegram.org/bots/api#formatting-options
   - https://core.telegram.org/bots/faq
+  - https://github.com/digitalygo/spynel/releases/tag/v1.2.0
 ---
 
 # Telegram topic conversations and bounded rich-text replies
@@ -95,3 +97,35 @@ The intended release target is `v1.2.0`. Publication is pending the standard rel
 - [Communication integrations](../../../docs/integrations.md)
 - [Architecture](../../../docs/architecture.md)
 - [Plain CLI and automation](../../../docs/cli.md)
+
+## Update 2026-09-20: v1.2.0 publication
+
+### Summary of changes
+
+The pending state in "Release and publication status" above is resolved: `v1.2.0` is released from feature commit and tag target `ad11164b5e3e75901bfefe71a0860957d032c2e0`, the stable non-prerelease GitHub Release publishes four native archives plus `checksums.txt`, `@digitalygo/spynel@1.2.0` is the npm `latest` package with SLSA provenance v1, and the live npm-managed installation runs that release. No live Telegram forum canary was performed; the topic-routing and bounded rich-text behavior is evidenced by the automated mock-backed test coverage described in the original validation steps and by the release gates recorded below.
+
+### Technical reasoning
+
+The release reused the existing gates instead of adding publication steps. A manual `workflow_dispatch` validation run on the exact release commit (run 35508832299) passed the `verify` job and all four native build jobs for Linux amd64, Linux arm64, macOS amd64, and macOS arm64 while the `publish` job remained skipped, keeping validation separate from publication. Publishing the GitHub Release then triggered run 35509194685, which passed `verify`, the same four native jobs, and `publish`. The publish job attached four native archives plus `checksums.txt` and released npm through GitHub Actions Trusted Publishing with the workflow's `id-token: write` and `npm publish --provenance`, so no long-lived npm credential was used.
+
+The host-target native package passed and the extracted archive reported `spynel 1.2.0`. Two environment and timing conditions are worth recording without treating either as a release defect. The clean-prefix exact-version installation needed a brief registry edge convergence window before it resolved `@digitalygo/spynel@1.2.0` and ran `spynel 1.2.0`. The updater's first attempt also hit a read-only local Linuxbrew npmrc `EACCES` after npm package extraction; a temporary permission change allowed the update to finish, the original `0444` mode was restored, and no persistent toolchain permission change remains. The `actions/download-artifact@v4` Node.js 20 deprecation annotation on the release run was informational and non-blocking.
+
+### Impact assessment
+
+- GitHub Release `v1.2.0` is public, stable, and non-prerelease at `ad11164b5e3e75901bfefe71a0860957d032c2e0`, with `checksums.txt` and the four supported native archives.
+- npm `latest` resolves to `@digitalygo/spynel@1.2.0` with the `spynel` bin mapping, Digitalygo repository metadata, and a SLSA provenance v1 attestation.
+- The live npm-managed home installation runs the `1.2.0` vendored binary, reports Telegram and Pi connected with an inactive turn, inherits model, reasoning, and service settings, and keeps task reviews at `never`; `spynel update --json check` reports current and latest `1.2.0` with no available update.
+- Topic routing and rich-text delivery continue to carry the automated mock-backed coverage from the original work. No live Telegram forum canary is claimed, and none was run.
+- The Linuxbrew npmrc permission incident was local to the updating environment. It produced no repository, workflow, package, or release change.
+
+### Validation steps
+
+- `git rev-list -n1 v1.2.0` resolves the tag to `ad11164b5e3e75901bfefe71a0860957d032c2e0`.
+- Manual validation run 35508832299 completed successfully: `verify` passed, all four native build jobs passed, `publish` was skipped.
+- Release run 35509194685 completed successfully: `verify` passed, all four native build jobs passed, `publish` passed.
+- `gh release view v1.2.0` reports a stable non-prerelease release with `checksums.txt`, `spynel_1.2.0_darwin_amd64.tar.gz`, `spynel_1.2.0_darwin_arm64.tar.gz`, `spynel_1.2.0_linux_amd64.tar.gz`, and `spynel_1.2.0_linux_arm64.tar.gz`.
+- Registry inspection confirmed `latest` at `1.2.0`, the `npm/bin/spynel.js` bin entry, the `git+https://github.com/digitalygo/spynel.git` repository, and the SLSA provenance v1 predicate.
+- Host-target native packaging and execution of the extracted archive reported `spynel 1.2.0`.
+- A clean-prefix installation of exactly `@digitalygo/spynel@1.2.0` returned `spynel 1.2.0` after the brief registry edge convergence window.
+- The global npm installation reports `@digitalygo/spynel@1.2.0`, and the running primary executable resolves to the package's vendored binary; `spynel status --json` reports Telegram and Pi connected with `turn_active` false, and `spynel update --json check` reports `Current` and `Latest` both `1.2.0`.
+- `scripts/dev.sh dox` and `git diff --check` passed for this documentation-only update.
