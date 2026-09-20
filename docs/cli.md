@@ -111,6 +111,8 @@ spynel command [--config PATH] [--conversation NAME] [--json] NAME [ARGUMENTS...
 
 `/trigger` lists triggerable processes. `/trigger orchestrator` performs an immediate serialized route pass, while `/trigger heartbeat` starts the primary semantic audit only if one is not already active. `/cleanup [days]` runs safe retention with a seven-day default; it uses strict whole-day validation and reports removed conversations, removed job archives and bytes, archived terminal tasks, protected items, and failures. `/new` is TUI-only because it switches the active durable conversation identity and shows that new conversation's normal welcome screen; the prior conversation remains available through `/resume`.
 
+`/pi session`, `/pi compact [instructions]`, and `/pi import <full-session-id>` manage the Pi conversation session and are available only in the local TUI and canonical private Telegram conversations. The plain CLI, WhatsApp, groups, forum topics, malformed routes, and other channels refuse before any session capability call and never receive a session ID or path. `/pi session` reports the full session ID and a shell-safe `pi --fork <absolute-session-file>` command, `/pi compact` compacts the existing idle session with optional instructions of at most 4096 Unicode code points, and `/pi import` forks one validated direct Pi session into `.spynel/runtime/pi-sessions` without modifying the source. On the allowed surfaces, the first successful non-continuing final response after a prompt that creates or rotates a session begins with the full session ID; that display-only notice stays out of durable history.
+
 ```bash
 spynel jobs
 spynel tasks
