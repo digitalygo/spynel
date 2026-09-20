@@ -218,17 +218,18 @@ func (s *Service) validateOrigin(origin orchestrator.Origin) error {
 	cfg := s.Settings.Snapshot()
 	switch origin.Channel {
 	case "telegram":
-		if strings.HasPrefix(origin.Conversation, "TG-group-") {
+		route, err := telegram.ParseConversation(origin.Conversation)
+		if err != nil {
+			return errors.New("invalid Telegram origin")
+		}
+		if route.IsGroup() {
 			if cfg.Channels.Telegram.GroupMode == "off" {
 				return errors.New("Telegram group origin is disabled")
 			}
 			return nil
 		}
-		if !strings.HasPrefix(origin.Conversation, "TG-") {
-			return errors.New("invalid Telegram origin")
-		}
-		id := strings.TrimPrefix(origin.Conversation, "TG-")
-		if s.telegramIdentity.AuthorizedPrivate(cfg.Channels.Telegram.AllowedUsers, id) {
+		// A private topic is authorized against its base numeric user.
+		if s.telegramIdentity.AuthorizedPrivate(cfg.Channels.Telegram.AllowedUsers, strconv.FormatInt(route.ChatID(), 10)) {
 			return nil
 		}
 		return errors.New("Telegram origin is not authorized by allowed_users")

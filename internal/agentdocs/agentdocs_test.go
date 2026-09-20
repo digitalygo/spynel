@@ -47,6 +47,28 @@ func TestTaskAndGoalTopicsDocumentLiveListingCommands(t *testing.T) {
 	}
 }
 
+func TestChannelsTopicDocumentsTelegramTopicsAndRichText(t *testing.T) {
+	output, err := Render(Request{Topic: "channels"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"TG-<user-id>-topic-<thread-id>",
+		"TG-group-<chat-id>-topic-<thread-id>",
+		"General topic",
+		"independent durable history and harness state",
+		"4096 parsed-visible code points",
+		"32768 parsed-visible code point reply budget",
+		"truncation marker",
+		"sendMessage",
+		"rate-limit rejection",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("channels documentation missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestHarnessTopicDocumentsPiACPAndQueueBatching(t *testing.T) {
 	output, err := Render(Request{Topic: "harnesses"})
 	if err != nil {

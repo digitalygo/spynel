@@ -13,13 +13,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/digitalygo/spynel/internal/channel"
 	"github.com/digitalygo/spynel/internal/config"
 	"github.com/digitalygo/spynel/internal/core"
+	markdownfmt "github.com/digitalygo/spynel/internal/markdown"
 	"github.com/digitalygo/spynel/internal/media"
 )
 
@@ -45,17 +48,6 @@ func (t blockingTelegramTranscriber) Transcribe(ctx context.Context, _ string) (
 		return "voice words", nil
 	case <-ctx.Done():
 		return "", ctx.Err()
-	}
-}
-
-func TestSplitHonorsTelegramCharacterLimit(t *testing.T) {
-	text := ""
-	for i := 0; i < 5000; i++ {
-		text += "界"
-	}
-	chunks := split(text, 4096)
-	if len(chunks) != 2 || len([]rune(chunks[0])) > 4096 || len([]rune(chunks[1])) > 4096 {
-		t.Fatalf("unexpected chunks: %d (%d, %d)", len(chunks), len([]rune(chunks[0])), len([]rune(chunks[1])))
 	}
 }
 
@@ -103,9 +95,13 @@ func TestSendAttachmentUsesNativeTelegramMediaMethods(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"ok":true,"result":{}}`))
 	}))
 	defer server.Close()
-	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot := New(config.Telegram{AllowedUsers: []string{"42"}}, "test")
 	bot.baseURL = server.URL
-	if err := bot.sendAttachment(context.Background(), "42", core.OutboundAttachment{
+	route, err := ParseConversation("TG-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bot.sendAttachment(context.Background(), route, core.OutboundAttachment{
 		Kind: "attachment", Name: "report.txt", Path: path, MediaType: "text/plain", MaxBytes: 1024,
 	}, 8); err != nil {
 		t.Fatal(err)
@@ -113,6 +109,9 @@ func TestSendAttachmentUsesNativeTelegramMediaMethods(t *testing.T) {
 	got := <-request
 	if got.URL.Path != "/bottest/sendDocument" || got.FormValue("chat_id") != "42" || got.FormValue("reply_parameters") != `{"message_id":8}` {
 		t.Fatalf("request path = %q, form = %#v", got.URL.Path, got.MultipartForm.Value)
+	}
+	if _, hasThread := got.MultipartForm.Value["message_thread_id"]; hasThread {
+		t.Fatalf("base conversation sent a thread id: %#v", got.MultipartForm.Value)
 	}
 	file, header, err := got.FormFile("document")
 	if err != nil {
@@ -136,7 +135,7 @@ func TestLongPollingRoutesMessageAndSendsReply(t *testing.T) {
 			_, _ = writer.Write([]byte(`{"ok":true,"result":true}`))
 		case "/bottest/getUpdates":
 			if polls.Add(1) == 1 {
-				_, _ = writer.Write([]byte(`{"ok":true,"result":[{"update_id":4,"message":{"message_id":8,"from":{"id":7,"username":"trusted"},"chat":{"id":42},"date":1,"text":"/status"}}]}`))
+				_, _ = writer.Write([]byte(`{"ok":true,"result":[{"update_id":4,"message":{"message_id":8,"from":{"id":7,"username":"trusted"},"chat":{"id":7,"type":"private"},"date":1,"text":"/status"}}]}`))
 				return
 			}
 			<-request.Context().Done()
@@ -170,7 +169,7 @@ func TestLongPollingRoutesMessageAndSendsReply(t *testing.T) {
 	}()
 	select {
 	case payload := <-sent:
-		if payload["chat_id"] != "42" || payload["text"] != "<b>ready</b> with <code>code</code>" || payload["parse_mode"] != "HTML" {
+		if payload["chat_id"] != "7" || payload["text"] != "<b>ready</b> with <code>code</code>" || payload["parse_mode"] != "HTML" {
 			t.Fatalf("unexpected Telegram reply %#v", payload)
 		}
 		cancel()
@@ -463,19 +462,6 @@ func TestGroupWelcomeDoesNotRequireAddressingTheBot(t *testing.T) {
 	}
 	if called {
 		t.Fatal("membership update was dispatched to the harness")
-	}
-}
-
-func TestTelegramMarkdownChunksRemainWithinLimit(t *testing.T) {
-	text := strings.Repeat("**bold & safe**\n", 1000)
-	chunks := telegramChunks(text, 4096)
-	if len(chunks) < 2 {
-		t.Fatalf("chunk count = %d, want multiple", len(chunks))
-	}
-	for _, chunk := range chunks {
-		if len([]rune(chunk)) > 4096 || strings.Contains(chunk, "**") {
-			t.Fatalf("invalid formatted chunk of length %d: %.80q", len([]rune(chunk)), chunk)
-		}
 	}
 }
 
@@ -954,5 +940,662 @@ func TestWebhookAuthorizationLossStopsListenerAndDeletesWebhook(t *testing.T) {
 	}
 	if _, err := http.DefaultClient.Get(localURL); err == nil {
 		t.Fatal("revoked webhook listener still accepts connections")
+	}
+}
+
+type telegramPayloadRecorder struct {
+	mu       sync.Mutex
+	messages []map[string]any
+	actions  []map[string]any
+}
+
+func (r *telegramPayloadRecorder) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Type", "application/json")
+	var payload map[string]any
+	switch {
+	case strings.HasSuffix(request.URL.Path, "/sendMessage"), strings.HasSuffix(request.URL.Path, "/sendChatAction"):
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+	}
+	r.mu.Lock()
+	switch {
+	case strings.HasSuffix(request.URL.Path, "/sendMessage"):
+		r.messages = append(r.messages, payload)
+	case strings.HasSuffix(request.URL.Path, "/sendChatAction"):
+		r.actions = append(r.actions, payload)
+	}
+	r.mu.Unlock()
+	_, _ = writer.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+}
+
+func (r *telegramPayloadRecorder) snapshot() (messages, actions []map[string]any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]map[string]any(nil), r.messages...), append([]map[string]any(nil), r.actions...)
+}
+
+func waitRecordedTelegramActions(t *testing.T, recorder *telegramPayloadRecorder, minimum int) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, actions := recorder.snapshot(); len(actions) >= minimum {
+			return actions
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d recorded Telegram actions", minimum)
+	return nil
+}
+
+func TestInboundMessageRoutesCanonicalTelegramConversations(t *testing.T) {
+	bot := New(config.Telegram{GroupMode: "all", AllowedUsers: []string{"7"}}, "test")
+	bot.client.Transport = telegramRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("inbound conversation routing contacted Telegram")
+	})
+	private := func(threadID int64, text string) *telegramMessage {
+		return &telegramMessage{MessageID: 1, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"}, MessageThreadID: threadID, Date: 1, Text: text}
+	}
+	group := func(threadID int64, text string) *telegramMessage {
+		return &telegramMessage{MessageID: 2, From: telegramUser{ID: 7}, Chat: telegramChat{ID: -100, Type: "supergroup"}, MessageThreadID: threadID, Date: 2, Text: text}
+	}
+	tests := []struct {
+		name    string
+		message *telegramMessage
+		want    string
+	}{
+		{name: "private absent thread", message: private(0, "/status"), want: "TG-7"},
+		{name: "private general topic", message: private(1, "/status"), want: "TG-7"},
+		{name: "private topic", message: private(5, "/status"), want: "TG-7-topic-5"},
+		{name: "group absent thread", message: group(0, "/status"), want: "TG-group--100"},
+		{name: "group general topic", message: group(1, "/status"), want: "TG-group--100"},
+		{name: "group first topic", message: group(2, "/status"), want: "TG-group--100-topic-2"},
+		{name: "group second topic", message: group(3, "/status"), want: "TG-group--100-topic-3"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got core.Message
+			bot.processUpdate(context.Background(), func(_ context.Context, message core.Message, _ core.Emit) error {
+				got = message
+				return nil
+			}, telegramUpdate{Message: test.message})
+			if got.Conversation != test.want {
+				t.Fatalf("conversation = %q, want %q", got.Conversation, test.want)
+			}
+		})
+	}
+}
+
+func TestTelegramTopicRichReplyChunksCarryThreadOnEveryMessage(t *testing.T) {
+	recorder := &telegramPayloadRecorder{}
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+	bot := New(config.Telegram{GroupMode: "all", AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+
+	var rich strings.Builder
+	for index := 0; index < 120; index++ {
+		fmt.Fprintf(&rich, "## Section %d\n\n- **bold %d** and `code %d` for [link](https://example.com/%d)\n\n%s\n\n", index, index, index, index, strings.Repeat("word ", 60))
+	}
+	bot.handle(context.Background(), func(_ context.Context, _ core.Message, emit core.Emit) error {
+		// The arrival typing signal runs asynchronously; hold the turn open until
+		// its provider call is observed so the assertion below is deterministic.
+		waitRecordedTelegramActions(t, recorder, 1)
+		emit(core.Event{Kind: core.EventFinal, Text: rich.String(), Done: true})
+		return nil
+	}, &telegramMessage{MessageID: 8, From: telegramUser{ID: 7}, Chat: telegramChat{ID: -100, Type: "supergroup"}, MessageThreadID: 2, Date: 1, Text: "hello"})
+
+	messages, actions := recorder.snapshot()
+	if len(messages) < 2 || len(messages) > markdownfmt.TelegramMaxChunks {
+		t.Fatalf("chunk count = %d, want 2..%d", len(messages), markdownfmt.TelegramMaxChunks)
+	}
+	visibleTotal := 0
+	for index, payload := range messages {
+		if payload["chat_id"] != "-100" || payload["message_thread_id"] != float64(2) {
+			t.Fatalf("chunk %d destination = %#v", index, payload)
+		}
+		if payload["parse_mode"] != "HTML" || payload["disable_web_page_preview"] != true {
+			t.Fatalf("chunk %d formatting = %#v", index, payload)
+		}
+		text, _ := payload["text"].(string)
+		visible := utf8.RuneCountInString(markdownfmt.TelegramChunkPlainText(text))
+		if visible <= 0 || visible > markdownfmt.TelegramMaxVisiblePerMessage {
+			t.Fatalf("chunk %d visible length = %d", index, visible)
+		}
+		visibleTotal += visible
+		if index == 0 {
+			if params, ok := payload["reply_parameters"].(map[string]any); !ok || params["message_id"] != float64(8) {
+				t.Fatalf("first chunk reply parameters = %#v", payload["reply_parameters"])
+			}
+			continue
+		}
+		if _, ok := payload["reply_parameters"]; ok {
+			t.Fatalf("chunk %d repeated reply parameters", index)
+		}
+	}
+	if visibleTotal > markdownfmt.TelegramMaxVisiblePerReply {
+		t.Fatalf("visible reply length = %d, want at most %d", visibleTotal, markdownfmt.TelegramMaxVisiblePerReply)
+	}
+	last, _ := messages[len(messages)-1]["text"].(string)
+	if !strings.Contains(markdownfmt.TelegramChunkPlainText(last), "response truncated") {
+		t.Fatalf("oversized topic reply was not truncated: %q", markdownfmt.TelegramChunkPlainText(last))
+	}
+	if len(actions) == 0 {
+		t.Fatal("topic turn emitted no typing action")
+	}
+	for _, payload := range actions {
+		if payload["chat_id"] != "-100" || payload["message_thread_id"] != float64(2) {
+			t.Fatalf("typing destination = %#v", payload)
+		}
+	}
+}
+
+func TestTelegramBaseDeliveryOmitsMessageThreadID(t *testing.T) {
+	recorder := &telegramPayloadRecorder{}
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	bot.handle(context.Background(), func(_ context.Context, _ core.Message, emit core.Emit) error {
+		emit(core.Event{Kind: core.EventFinal, Text: "plain response", Done: true})
+		return nil
+	}, &telegramMessage{MessageID: 8, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"}, Date: 1, Text: "hello"})
+
+	messages, actions := recorder.snapshot()
+	if len(messages) != 1 || messages[0]["text"] != "plain response" {
+		t.Fatalf("messages = %#v", messages)
+	}
+	for _, payload := range append(messages, actions...) {
+		if _, ok := payload["message_thread_id"]; ok {
+			t.Fatalf("base conversation sent a thread id: %#v", payload)
+		}
+	}
+}
+
+func TestTelegramTopicErrorsAndProactiveDeliveryCarryThread(t *testing.T) {
+	recorder := &telegramPayloadRecorder{}
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+	bot := New(config.Telegram{GroupMode: "all", AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	bot.handle(context.Background(), func(context.Context, core.Message, core.Emit) error {
+		return errors.New("handler failed")
+	}, &telegramMessage{MessageID: 8, From: telegramUser{ID: 7}, Chat: telegramChat{ID: -100, Type: "supergroup"}, MessageThreadID: 2, Date: 1, Text: "hello"})
+	if err := bot.DeliverEvent(context.Background(), "TG-7-topic-5", "event", core.Event{Kind: core.EventFinal, Text: "proactive", Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bot.Deliver(context.Background(), "TG-group--100-topic-2", "event", "direct"); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, _ := recorder.snapshot()
+	if len(messages) != 3 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	if messages[0]["text"] != "Error handler failed" || messages[0]["message_thread_id"] != float64(2) {
+		t.Fatalf("topic error message = %#v", messages[0])
+	}
+	if messages[1]["text"] != "proactive" || messages[1]["chat_id"] != "7" || messages[1]["message_thread_id"] != float64(5) {
+		t.Fatalf("private topic proactive message = %#v", messages[1])
+	}
+	if messages[2]["text"] != "direct" || messages[2]["chat_id"] != "-100" || messages[2]["message_thread_id"] != float64(2) {
+		t.Fatalf("group topic direct message = %#v", messages[2])
+	}
+}
+
+func TestTelegramTopicAttachmentsCarryMessageThreadID(t *testing.T) {
+	root := t.TempDir()
+	documentPath := filepath.Join(root, "report.txt")
+	photoPath := filepath.Join(root, "photo.png")
+	if err := os.WriteFile(documentPath, []byte("report body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(photoPath, []byte("photo body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan *http.Request, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := request.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("parse multipart: %v", err)
+		}
+		requests <- request
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true,"result":{}}`))
+	}))
+	defer server.Close()
+	route, err := ParseConversation("TG-group--100-topic-9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bot := New(config.Telegram{GroupMode: "all", AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	for _, attachment := range []core.OutboundAttachment{
+		{Kind: "attachment", Name: "report.txt", Path: documentPath, MediaType: "text/plain", MaxBytes: 1024},
+		{Kind: "photo", Name: "photo.png", Path: photoPath, MediaType: "image/png", MaxBytes: 1024},
+	} {
+		if err := bot.sendAttachment(context.Background(), route, attachment, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := <-requests; got.URL.Path != "/bottest/sendDocument" || got.FormValue("chat_id") != "-100" || got.FormValue("message_thread_id") != "9" {
+		t.Fatalf("document request = %q %#v", got.URL.Path, got.MultipartForm.Value)
+	}
+	if got := <-requests; got.URL.Path != "/bottest/sendPhoto" || got.FormValue("chat_id") != "-100" || got.FormValue("message_thread_id") != "9" {
+		t.Fatalf("photo request = %q %#v", got.URL.Path, got.MultipartForm.Value)
+	}
+}
+
+func waitThreadCount(t *testing.T, mu *sync.Mutex, counts map[int64]int, threadID int64, minimum int, description string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := counts[threadID]
+		mu.Unlock()
+		if got >= minimum {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", description)
+}
+
+func TestTelegramTopicActivityDoesNotCrossCancel(t *testing.T) {
+	var mu sync.Mutex
+	counts := map[int64]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(request.URL.Path, "/sendChatAction") {
+			var payload map[string]any
+			_ = json.NewDecoder(request.Body).Decode(&payload)
+			if thread, ok := payload["message_thread_id"].(float64); ok {
+				mu.Lock()
+				counts[int64(thread)]++
+				mu.Unlock()
+			}
+		}
+		_, _ = writer.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+	bot := New(config.Telegram{GroupMode: "all", AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	bot.activity = newTelegramActivity(bot, 10*time.Millisecond)
+	topic := func(threadID int64) *telegramMessage {
+		return &telegramMessage{MessageID: threadID, From: telegramUser{ID: 7}, Chat: telegramChat{ID: -100, Type: "supergroup"}, MessageThreadID: threadID, Date: 1, Text: "hello"}
+	}
+	entered := map[int64]chan struct{}{2: make(chan struct{}), 3: make(chan struct{})}
+	releases := map[int64]chan struct{}{2: make(chan struct{}), 3: make(chan struct{})}
+	done := map[int64]chan struct{}{2: make(chan struct{}), 3: make(chan struct{})}
+	for _, threadID := range []int64{2, 3} {
+		go func() {
+			defer close(done[threadID])
+			bot.handle(context.Background(), func(context.Context, core.Message, core.Emit) error {
+				close(entered[threadID])
+				<-releases[threadID]
+				return nil
+			}, topic(threadID))
+		}()
+	}
+	waitClosed(t, entered[2], "topic 2 handler")
+	waitClosed(t, entered[3], "topic 3 handler")
+	waitThreadCount(t, &mu, counts, 2, 2, "topic 2 typing")
+	waitThreadCount(t, &mu, counts, 3, 2, "topic 3 typing")
+	close(releases[3])
+	waitClosed(t, done[3], "topic 3 completion")
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	stoppedTopic3, beforeTopic2 := counts[3], counts[2]
+	mu.Unlock()
+	time.Sleep(40 * time.Millisecond)
+	mu.Lock()
+	afterTopic3, afterTopic2 := counts[3], counts[2]
+	mu.Unlock()
+	if afterTopic3 != stoppedTopic3 {
+		t.Fatalf("topic 3 typing continued after its turn stopped: %d -> %d", stoppedTopic3, afterTopic3)
+	}
+	if afterTopic2 <= beforeTopic2 {
+		t.Fatalf("topic 2 typing stopped with topic 3: %d -> %d", beforeTopic2, afterTopic2)
+	}
+	close(releases[2])
+	waitClosed(t, done[2], "topic 2 completion")
+}
+
+func TestTelegramOutboundRoutesFailClosedBeforeProviderCalls(t *testing.T) {
+	providerCalls := 0
+	bot := New(config.Telegram{GroupMode: "off", AllowedUsers: []string{"7"}}, "test")
+	bot.client.Transport = telegramRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalls++
+		return nil, errors.New("unexpected Telegram provider call")
+	})
+	for _, conversation := range []string{
+		"", "TG-", "tg-7", "TG-7x", "TG-0", "TG-7-topic-0", "TG-7-topic-1", "TG-7-topic-",
+		"TG-group-100", "TG-group--100", "TG-group--100-topic-2", "TG-8", "TG-8-topic-4",
+	} {
+		if err := bot.Deliver(context.Background(), conversation, "event", "text"); err == nil {
+			t.Fatalf("Deliver(%q) succeeded for a failing route", conversation)
+		}
+		if err := bot.DeliverEvent(context.Background(), conversation, "event", core.Event{Kind: core.EventFinal, Text: "text", Done: true}); err == nil {
+			t.Fatalf("DeliverEvent(%q) succeeded for a failing route", conversation)
+		}
+	}
+	if providerCalls != 0 {
+		t.Fatalf("failing routes contacted Telegram: %d calls", providerCalls)
+	}
+	bot.RevokeRuntimeAuthorization()
+	if err := bot.Deliver(context.Background(), "TG-7", "event", "text"); err == nil {
+		t.Fatal("revoked runtime delivered text")
+	}
+	if err := bot.DeliverEvent(context.Background(), "TG-7", "event", core.Event{Kind: core.EventActivity, Active: true}); err == nil {
+		t.Fatal("revoked runtime delivered activity")
+	}
+	if providerCalls != 0 {
+		t.Fatalf("revoked runtime contacted Telegram: %d calls", providerCalls)
+	}
+}
+
+func TestTelegramHTMLParseFailureFallsBackToPlainTextOnce(t *testing.T) {
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		var payload map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		payloads = append(payloads, payload)
+		if len(payloads) == 1 {
+			writer.WriteHeader(http.StatusBadRequest)
+			_, _ = writer.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Unexpected end tag at byte offset 12"}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"ok":true,"result":{"message_id":5}}`))
+	}))
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	route, err := ParseConversation("TG-7-topic-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bot.send(context.Background(), route, "**bold** and `code`", 0); err != nil {
+		t.Fatalf("HTML parse fallback: %v", err)
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("sendMessage attempts = %d, want 2", len(payloads))
+	}
+	htmlText, _ := payloads[0]["text"].(string)
+	if payloads[0]["parse_mode"] != "HTML" {
+		t.Fatalf("first attempt = %#v", payloads[0])
+	}
+	if _, ok := payloads[1]["parse_mode"]; ok {
+		t.Fatalf("plain fallback retained parse_mode: %#v", payloads[1])
+	}
+	if payloads[1]["text"] != markdownfmt.TelegramChunkPlainText(htmlText) {
+		t.Fatalf("plain fallback text = %#v", payloads[1]["text"])
+	}
+	for index, payload := range payloads {
+		if payload["message_thread_id"] != float64(5) {
+			t.Fatalf("attempt %d thread = %#v", index, payload["message_thread_id"])
+		}
+	}
+}
+
+func TestTelegramOtherSendFailuresDoNotDowngrade(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempts.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}`))
+	}))
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "SECRET-TOKEN")
+	bot.baseURL = server.URL
+	route, err := ParseConversation("TG-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = bot.send(context.Background(), route, "**bold**", 0)
+	if err == nil {
+		t.Fatal("non-parse send failure was downgraded")
+	}
+	var apiErr *telegramAPIError
+	if !errors.As(err, &apiErr) || apiErr.parse || apiErr.code != http.StatusBadRequest {
+		t.Fatalf("send error = %#v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("send attempts = %d, want 1", attempts.Load())
+	}
+	if strings.Contains(err.Error(), "SECRET-TOKEN") {
+		t.Fatalf("send error leaked the bot token: %v", err)
+	}
+}
+
+func TestTelegramRateLimitRetriesOnceWithBoundedWait(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if attempts.Add(1) == 1 {
+			writer.WriteHeader(http.StatusTooManyRequests)
+			_, _ = writer.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"ok":true,"result":{"message_id":9}}`))
+	}))
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	var waits []time.Duration
+	bot.retryWait = func(_ context.Context, delay time.Duration) error {
+		waits = append(waits, delay)
+		return nil
+	}
+	if _, err := bot.call(context.Background(), "sendMessage", map[string]any{"chat_id": "7", "text": "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("provider attempts = %d, want 2", attempts.Load())
+	}
+	if len(waits) != 1 || waits[0] != time.Second {
+		t.Fatalf("rate-limit waits = %#v", waits)
+	}
+}
+
+func TestTelegramRateLimitAboveCapFailsWithoutWaiting(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		attempts.Add(1)
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = writer.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 90","parameters":{"retry_after":90}}`))
+	}))
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	waited := false
+	bot.retryWait = func(context.Context, time.Duration) error {
+		waited = true
+		return nil
+	}
+	if _, err := bot.call(context.Background(), "sendMessage", map[string]any{"chat_id": "7", "text": "hello"}); err == nil {
+		t.Fatal("rate limit beyond the cap did not fail")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("provider attempts = %d, want 1", attempts.Load())
+	}
+	if waited {
+		t.Fatal("rate limit beyond the cap waited")
+	}
+}
+
+func TestTelegramRateLimitNeverLoopsMoreThanOnce(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		attempts.Add(1)
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = writer.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 2","parameters":{"retry_after":2}}`))
+	}))
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	bot.retryWait = func(context.Context, time.Duration) error { return nil }
+	if _, err := bot.call(context.Background(), "sendMessage", map[string]any{"chat_id": "7", "text": "hello"}); err == nil {
+		t.Fatal("persistent rate limit did not fail")
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("provider attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestTelegramRateLimitRetryRechecksRuntimeAuthorization(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		attempts.Add(1)
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = writer.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 3","parameters":{"retry_after":3}}`))
+	}))
+	defer server.Close()
+	allowed := []string{"7"}
+	bot := New(config.Telegram{AllowedUsers: allowed}, "test")
+	bot.SetAllowedUsersSource(func() []string { return allowed })
+	bot.baseURL = server.URL
+	bot.retryWait = func(context.Context, time.Duration) error {
+		allowed = nil
+		return nil
+	}
+	if _, err := bot.call(context.Background(), "sendMessage", map[string]any{"chat_id": "7", "text": "hello"}); !errors.Is(err, errTelegramRuntimeAuthorization) {
+		t.Fatalf("retry error = %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("revoked retry contacted Telegram %d times, want 1", attempts.Load())
+	}
+}
+
+func TestTelegramRateLimitRetryReauthorizesPrivateTopicRecipient(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		attempts.Add(1)
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = writer.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`))
+	}))
+	defer server.Close()
+	allowed := []string{"7"}
+	bot := New(config.Telegram{AllowedUsers: allowed}, "test")
+	bot.SetAllowedUsersSource(func() []string { return allowed })
+	bot.baseURL = server.URL
+	bot.retryWait = func(context.Context, time.Duration) error {
+		// The list stays valid while the private topic recipient is replaced.
+		allowed = []string{"8"}
+		return nil
+	}
+	route, err := ParseConversation("TG-7-topic-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = bot.send(context.Background(), route, "hello", 0)
+	if err == nil || !strings.Contains(err.Error(), "allowed_users") {
+		t.Fatalf("private topic retry error = %v", err)
+	}
+	if errors.Is(err, errTelegramRuntimeAuthorization) {
+		t.Fatalf("recipient revocation was misreported as global authorization loss: %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("revoked private topic contacted Telegram %d times, want 1", attempts.Load())
+	}
+}
+
+func TestTelegramRateLimitRetryReauthorizesGroupRoute(t *testing.T) {
+	tests := []struct {
+		name      string
+		groupMode string
+		wantErr   string
+		wantCalls int32
+	}{
+		{name: "still allowed", groupMode: "all", wantCalls: 2},
+		{name: "disabled during wait", groupMode: "off", wantErr: "group delivery is disabled", wantCalls: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				if attempts.Add(1) == 1 {
+					writer.WriteHeader(http.StatusTooManyRequests)
+					_, _ = writer.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`))
+					return
+				}
+				_, _ = writer.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+			}))
+			defer server.Close()
+			bot := New(config.Telegram{GroupMode: "all", AllowedUsers: []string{"7"}}, "test")
+			bot.baseURL = server.URL
+			bot.retryWait = func(context.Context, time.Duration) error {
+				bot.config.GroupMode = test.groupMode
+				return nil
+			}
+			route, err := ParseConversation("TG-group--100-topic-9")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = bot.send(context.Background(), route, "hello", 0)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("group retry error = %v, want %q", err, test.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("group retry failed: %v", err)
+			}
+			if got := attempts.Load(); got != test.wantCalls {
+				t.Fatalf("provider calls = %d, want %d", got, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestTelegramProviderBoundaryFailsClosedForInvalidRoute(t *testing.T) {
+	providerCalls := 0
+	bot := New(config.Telegram{GroupMode: "all", AllowedUsers: []string{"7"}}, "test")
+	bot.client.Transport = telegramRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalls++
+		return nil, errors.New("unexpected Telegram provider call")
+	})
+	for _, route := range []Route{{}, {chatID: 7, group: true}, {chatID: 0}, {chatID: 7, threadID: -1}} {
+		if err := bot.send(context.Background(), route, "text", 0); err == nil {
+			t.Fatalf("send(%+v) succeeded for an invalid route", route)
+		}
+		if err := bot.action(context.Background(), route, "typing"); err == nil {
+			t.Fatalf("action(%+v) succeeded for an invalid route", route)
+		}
+	}
+	if providerCalls != 0 {
+		t.Fatalf("invalid routes contacted Telegram: %d calls", providerCalls)
+	}
+}
+
+func TestTelegramAttachmentBoundaryReauthorizesRoute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.txt")
+	if err := os.WriteFile(path, []byte("report body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	allowed := []string{"7"}
+	providerCalls := 0
+	bot := New(config.Telegram{AllowedUsers: allowed}, "test")
+	bot.SetAllowedUsersSource(func() []string { return allowed })
+	bot.client.Transport = telegramRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalls++
+		return nil, errors.New("unexpected Telegram provider call")
+	})
+	route, err := ParseConversation("TG-7-topic-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The list stays globally valid while the attachment recipient is revoked.
+	allowed = []string{"8"}
+	err = bot.sendAttachment(context.Background(), route, core.OutboundAttachment{
+		Kind: "attachment", Name: "report.txt", Path: path, MediaType: "text/plain", MaxBytes: 1024,
+	}, 0)
+	if err == nil || !strings.Contains(err.Error(), "allowed_users") {
+		t.Fatalf("revoked attachment route error = %v", err)
+	}
+	if providerCalls != 0 {
+		t.Fatalf("revoked attachment route contacted Telegram: %d calls", providerCalls)
 	}
 }

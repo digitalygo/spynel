@@ -198,6 +198,106 @@ func TestNotifyUsesVerifiedTelegramUsernameMappingAndRechecksRevocation(t *testi
 	}
 }
 
+func TestValidateOriginParsesTelegramTopicsStrictly(t *testing.T) {
+	root := t.TempDir()
+	if err := workspace.Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := config.Load(config.PathForRoot(root))
+	cfg.Channels.Telegram.AllowedUsers = []string{"7"}
+	cfg.Channels.Telegram.GroupMode = "all"
+	service := New(cfg, newServiceHarness())
+	validate := func(conversation string) error {
+		t.Helper()
+		if _, err := service.History.Append("telegram", conversation, history.Entry{Role: "user", Content: "known"}); err != nil {
+			t.Fatal(err)
+		}
+		return service.validateOrigin(orchestrator.Origin{Channel: "telegram", Conversation: conversation})
+	}
+	for _, conversation := range []string{"TG-7", "TG-7-topic-2", "TG-group--100", "TG-group--100-topic-2"} {
+		if err := validate(conversation); err != nil {
+			t.Fatalf("validateOrigin(%q) = %v", conversation, err)
+		}
+	}
+	for _, conversation := range []string{"TG-", "tg-7", "TG-0", "TG-7-topic-", "TG-7-topic-0", "TG-7-topic-1", "TG-7-topic--2", "TG-group-100", "TG-group--0"} {
+		if err := validate(conversation); err == nil {
+			t.Fatalf("validateOrigin(%q) accepted a malformed Telegram conversation", conversation)
+		}
+	}
+	if _, err := service.Settings.Update(func(next *config.Config) error {
+		next.Channels.Telegram.GroupMode = "off"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.validateOrigin(orchestrator.Origin{Channel: "telegram", Conversation: "TG-group--100-topic-2"}); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("group topic with group mode off = %v", err)
+	}
+	if err := service.validateOrigin(orchestrator.Origin{Channel: "telegram", Conversation: "TG-7-topic-2"}); err != nil {
+		t.Fatalf("private topic with group mode off = %v", err)
+	}
+}
+
+func TestValidateOriginAuthorizesPrivateTopicsByBaseUserIdentity(t *testing.T) {
+	root := t.TempDir()
+	if err := workspace.Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := config.Load(config.PathForRoot(root))
+	cfg.Channels.Telegram.AllowedUsers = []string{"@frd3l"}
+	service := New(cfg, newServiceHarness())
+	for _, conversation := range []string{"TG-518743883-topic-9", "TG-999-topic-9"} {
+		if _, err := service.History.Append("telegram", conversation, history.Entry{Role: "user", Content: "known"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identities := telegram.NewIdentityStore(cfg.StatePath("runtime", "telegram-identities.json"))
+	if err := identities.RecordVerifiedPrivate(518743883, 518743883, "frd3l"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.validateOrigin(orchestrator.Origin{Channel: "telegram", Conversation: "TG-518743883-topic-9"}); err != nil {
+		t.Fatalf("verified username topic origin: %v", err)
+	}
+	if err := service.validateOrigin(orchestrator.Origin{Channel: "telegram", Conversation: "TG-999-topic-9"}); err == nil {
+		t.Fatal("unrelated private topic was authorized")
+	}
+	if _, err := service.Settings.Update(func(next *config.Config) error {
+		next.Channels.Telegram.AllowedUsers = []string{"someone_else"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.validateOrigin(orchestrator.Origin{Channel: "telegram", Conversation: "TG-518743883-topic-9"}); err == nil {
+		t.Fatal("revoked mapped username topic remained authorized")
+	}
+}
+
+func TestRecentAuthorizedRoutingKeepsGroupTopicExclusion(t *testing.T) {
+	root := t.TempDir()
+	if err := workspace.Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := config.Load(config.PathForRoot(root))
+	cfg.Channels.Telegram.Enabled = true
+	cfg.Channels.Telegram.AllowedUsers = []string{"7"}
+	cfg.Channels.Telegram.GroupMode = "all"
+	service := New(cfg, newServiceHarness())
+	router := &recentNotificationRouter{}
+	service.DeliveryControl = router
+	base := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	_, _ = service.History.Append("telegram", "TG-group--100-topic-2", history.Entry{At: base, Role: "user", Content: "group topic activity"})
+	if _, err := service.NotifyRecentAuthorized(context.Background(), "must not leak"); err == nil {
+		t.Fatal("recent-authorized routing selected a group topic")
+	}
+	_, _ = service.History.Append("telegram", "TG-7-topic-5", history.Entry{At: base.Add(time.Minute), Role: "user", Content: "private topic activity"})
+	if _, err := service.NotifyRecentAuthorized(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(router.calls) != 1 || !strings.HasPrefix(router.calls[0], "telegram/TG-7-topic-5/") {
+		t.Fatalf("recent delivery = %#v", router.calls)
+	}
+}
+
 func TestTaskCommandDelegatesCreationPolicyToCommunicationAgent(t *testing.T) {
 	root := t.TempDir()
 	if err := workspace.Init(root, false); err != nil {

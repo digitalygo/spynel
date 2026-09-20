@@ -37,7 +37,7 @@ type Bot struct {
 	store             *media.Store
 	speech            media.Transcriber
 	me                telegramUser
-	activity          *channel.ActivityIndicator[string]
+	activity          *channel.ActivityIndicator[Route]
 	activityMu        sync.Mutex
 	proactiveActivity map[string][]func()
 	identity          *IdentityStore
@@ -47,6 +47,9 @@ type Bot struct {
 	authLost          chan struct{}
 	authLostOnce      sync.Once
 	listen            func(string, string) (net.Listener, error)
+	// retryWait sleeps out a provider-requested retry delay. Tests replace it
+	// to observe waits without real sleeping.
+	retryWait func(context.Context, time.Duration) error
 }
 
 var errTelegramRuntimeAuthorization = errors.New("Telegram runtime authorization is unavailable: allowed_users has no valid user")
@@ -60,18 +63,18 @@ func NewWithIdentityStore(cfg config.Telegram, token, identityPath string) *Bot 
 	if timeout < 20*time.Second {
 		timeout = 20 * time.Second
 	}
-	bot := &Bot{config: cfg, token: token, client: &http.Client{Timeout: timeout}, baseURL: "https://api.telegram.org", identity: NewIdentityStore(identityPath), authLost: make(chan struct{}), listen: net.Listen, proactiveActivity: map[string][]func(){}}
+	bot := &Bot{config: cfg, token: token, client: &http.Client{Timeout: timeout}, baseURL: "https://api.telegram.org", identity: NewIdentityStore(identityPath), authLost: make(chan struct{}), listen: net.Listen, proactiveActivity: map[string][]func(){}, retryWait: waitWithContext}
 	bot.allowedUsers = func() []string { return cfg.AllowedUsers }
 	bot.activity = newTelegramActivity(bot, 4*time.Second)
 	return bot
 }
 
-func newTelegramActivity(bot *Bot, interval time.Duration) *channel.ActivityIndicator[string] {
-	return channel.NewActivityIndicator(interval, func(ctx context.Context, chatID string, active bool) error {
+func newTelegramActivity(bot *Bot, interval time.Duration) *channel.ActivityIndicator[Route] {
+	return channel.NewActivityIndicator(interval, func(ctx context.Context, route Route, active bool) error {
 		if !active {
 			return nil
 		}
-		return bot.action(ctx, chatID, "typing")
+		return bot.action(ctx, route, "typing")
 	})
 }
 
@@ -128,39 +131,25 @@ func (b *Bot) Deliver(ctx context.Context, conversation, eventID, text string) e
 	if err := b.requireRuntimeAuthorization(); err != nil {
 		return err
 	}
-	var chatID string
-	if strings.HasPrefix(conversation, "TG-group-") {
-		if b.config.GroupMode == "off" {
-			return errors.New("Telegram group delivery is disabled")
-		}
-		chatID = strings.TrimPrefix(conversation, "TG-group-")
-	} else if strings.HasPrefix(conversation, "TG-") {
-		chatID = strings.TrimPrefix(conversation, "TG-")
-		if !b.identity.AuthorizedPrivate(b.liveAllowedUsers(), chatID) {
-			return errors.New("Telegram origin is not in allowed_users")
-		}
-	} else {
-		return errors.New("invalid Telegram conversation origin")
+	route, err := b.deliveryRoute(conversation)
+	if err != nil {
+		return err
 	}
-	if _, err := strconv.ParseInt(chatID, 10, 64); err != nil {
-		return errors.New("invalid Telegram chat identifier")
-	}
-	_, err := b.sendWithIDs(ctx, chatID, text, 0, false)
-	return err
+	return b.send(ctx, route, text, 0)
 }
 
 func (b *Bot) DeliverEvent(ctx context.Context, conversation, eventID string, event core.Event) error {
 	if err := b.requireRuntimeAuthorization(); err != nil {
 		return err
 	}
-	chatID, err := b.deliveryChatID(conversation)
+	route, err := b.deliveryRoute(conversation)
 	if err != nil {
 		return err
 	}
 	if event.Kind == core.EventActivity {
 		b.activityMu.Lock()
 		if event.Active {
-			b.proactiveActivity[conversation] = append(b.proactiveActivity[conversation], b.activity.Start(ctx, chatID))
+			b.proactiveActivity[conversation] = append(b.proactiveActivity[conversation], b.activity.Start(ctx, route))
 			b.activityMu.Unlock()
 			return nil
 		}
@@ -188,26 +177,53 @@ func (b *Bot) DeliverEvent(ctx context.Context, conversation, eventID string, ev
 		if event.Kind == core.EventError {
 			text = channel.ErrorResponse(text)
 		}
-		return b.Deliver(ctx, conversation, eventID, text)
+		return b.send(ctx, route, text, 0)
 	}
 	return nil
 }
 
-func (b *Bot) deliveryChatID(conversation string) (string, error) {
-	if strings.HasPrefix(conversation, "TG-group-") {
+// deliveryRoute resolves and authorizes an outbound conversation through the
+// strict canonical grammar before any provider call. Malformed conversations,
+// disabled group delivery, and unauthorized private users fail closed. A
+// private topic is authorized against its base numeric user.
+func (b *Bot) deliveryRoute(conversation string) (Route, error) {
+	route, err := ParseConversation(conversation)
+	if err != nil {
+		return Route{}, errors.New("invalid Telegram conversation origin")
+	}
+	if err := b.authorizeRoutePolicy(route); err != nil {
+		return Route{}, err
+	}
+	return route, nil
+}
+
+// authorizeRoutePolicy reapplies the live recipient policy for one parsed
+// route: malformed routes fail closed, group routes honor the current
+// group-mode policy, and private routes re-check the live allow-list against
+// their base numeric user.
+func (b *Bot) authorizeRoutePolicy(route Route) error {
+	if route.Conversation() == "" {
+		return errors.New("invalid Telegram conversation origin")
+	}
+	if route.IsGroup() {
 		if b.config.GroupMode == "off" {
-			return "", errors.New("Telegram group delivery is disabled")
+			return errors.New("Telegram group delivery is disabled")
 		}
-		return strings.TrimPrefix(conversation, "TG-group-"), nil
+		return nil
 	}
-	if strings.HasPrefix(conversation, "TG-") {
-		chatID := strings.TrimPrefix(conversation, "TG-")
-		if !b.identity.AuthorizedPrivate(b.liveAllowedUsers(), chatID) {
-			return "", errors.New("Telegram origin is not in allowed_users")
-		}
-		return chatID, nil
+	if !b.identity.AuthorizedPrivate(b.liveAllowedUsers(), strconv.FormatInt(route.ChatID(), 10)) {
+		return errors.New("Telegram origin is not in allowed_users")
 	}
-	return "", errors.New("invalid Telegram conversation origin")
+	return nil
+}
+
+// authorizeProviderRoute reapplies the global runtime authorization and the
+// live route policy immediately before a route-bound provider call.
+func (b *Bot) authorizeProviderRoute(route Route) error {
+	if err := b.requireRuntimeAuthorization(); err != nil {
+		return err
+	}
+	return b.authorizeRoutePolicy(route)
 }
 
 func (b *Bot) Run(ctx context.Context, handler channel.Handler) error {
@@ -371,7 +387,7 @@ func (b *Bot) runWebhook(ctx context.Context, handler channel.Handler) error {
 	// Deleting an already-registered webhook is a teardown-only exception to
 	// the normal provider boundary: revocation must block all useful traffic,
 	// but it must not strand Telegram delivery at a listener that is gone.
-	_, _ = b.callProvider(shutdownContext, "deleteWebhook", map[string]any{"drop_pending_updates": false})
+	_, _ = b.callProvider(shutdownContext, "deleteWebhook", map[string]any{"drop_pending_updates": false}, b.requireRuntimeAuthorization)
 	return runErr
 }
 
@@ -428,6 +444,10 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 	if err := b.requireRuntimeAuthorization(); err != nil {
 		return
 	}
+	route, err := b.messageRoute(message)
+	if err != nil {
+		return
+	}
 	chatID := strconv.FormatInt(message.Chat.ID, 10)
 	var activityMu sync.Mutex
 	var finishActivity func()
@@ -435,7 +455,7 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 	setActivity := func(active bool) {
 		activityMu.Lock()
 		if active && finishActivity == nil {
-			finishActivity = b.activity.Start(ctx, chatID)
+			finishActivity = b.activity.Start(ctx, route)
 			activityMu.Unlock()
 			return
 		}
@@ -464,7 +484,7 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 	}
 	text, err := b.messageText(ctx, message)
 	if err != nil {
-		_ = b.send(context.Background(), chatID, channel.ErrorResponse("Spynel attachment error: "+err.Error()), message.MessageID)
+		_ = b.send(context.Background(), route, channel.ErrorResponse("Spynel attachment error: "+err.Error()), message.MessageID)
 		setActivity(false)
 		return
 	}
@@ -503,12 +523,12 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 			text = channel.ErrorResponse(text)
 		}
 		if text != "" {
-			_ = b.send(context.Background(), chatID, text, message.MessageID)
+			_ = b.send(context.Background(), route, text, message.MessageID)
 			message.MessageID = 0
 		}
 		for _, attachment := range event.Attachments {
-			if err := b.sendAttachment(context.Background(), chatID, attachment, message.MessageID); err != nil {
-				_ = b.send(context.Background(), chatID, channel.ErrorResponse("Spynel attachment delivery error: "+err.Error()), message.MessageID)
+			if err := b.sendAttachment(context.Background(), route, attachment, message.MessageID); err != nil {
+				_ = b.send(context.Background(), route, channel.ErrorResponse("Spynel attachment delivery error: "+err.Error()), message.MessageID)
 			}
 			message.MessageID = 0
 		}
@@ -518,12 +538,12 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 		return
 	}
 	err = handler(ctx, core.Message{
-		Channel: b.Name(), Conversation: b.conversationID(message), Sender: b.sender(message.From),
+		Channel: b.Name(), Conversation: route.Conversation(), Sender: b.sender(message.From),
 		SourceMessageID: fmt.Sprintf("telegram:%s:%d", chatID, message.MessageID), ReplyTo: telegramReplyTo(message), Text: text, ReceivedAt: time.Unix(message.Date, 0).UTC(),
 	}, emit)
 	if err != nil {
 		setActivity(false)
-		_ = b.send(context.Background(), chatID, channel.ErrorResponse(err.Error()), message.MessageID)
+		_ = b.send(context.Background(), route, channel.ErrorResponse(err.Error()), message.MessageID)
 		return
 	}
 	activityMu.Lock()
@@ -544,21 +564,30 @@ func telegramReplyTo(message *telegramMessage) string {
 	return channel.ReplyReference(strconv.FormatInt(replied.MessageID, 10), firstNonempty(replied.Text, replied.Caption))
 }
 
-func (b *Bot) conversationID(message *telegramMessage) string {
+// messageRoute classifies an inbound message into its canonical route.
+// Groups and supergroups key on the chat ID and message thread; private chats
+// key on the sender so a private topic stays bound to its authorized user.
+// Thread IDs 0 and 1 (absent or General) canonicalize to the base
+// conversation; IDs of at least 2 address a `-topic-<id>` conversation.
+func (b *Bot) messageRoute(message *telegramMessage) (Route, error) {
 	if message.Chat.Type == "group" || message.Chat.Type == "supergroup" {
-		return "TG-group-" + strconv.FormatInt(message.Chat.ID, 10)
+		return NewGroupRoute(message.Chat.ID, message.MessageThreadID)
 	}
-	return "TG-" + strconv.FormatInt(message.From.ID, 10)
+	return NewPrivateRoute(message.From.ID, message.MessageThreadID)
 }
 
 func (b *Bot) welcome(ctx context.Context, message *telegramMessage) {
+	route, err := b.messageRoute(message)
+	if err != nil {
+		return
+	}
 	for _, member := range message.NewChatMembers {
 		welcome := b.config.WelcomeMessage
 		if welcome == "" {
 			welcome = "Welcome, {name}!"
 		}
 		name := firstNonempty(member.FirstName, b.sender(member))
-		_ = b.send(ctx, strconv.FormatInt(message.Chat.ID, 10), strings.ReplaceAll(welcome, "{name}", name), message.MessageID)
+		_ = b.send(ctx, route, strings.ReplaceAll(welcome, "{name}", name), message.MessageID)
 	}
 }
 
@@ -699,38 +728,51 @@ func (b *Bot) updates(ctx context.Context, offset int64) ([]telegramUpdate, erro
 	return envelope.Result, nil
 }
 
-func (b *Bot) send(ctx context.Context, chatID, text string, replyTo int64) error {
-	_, err := b.sendWithIDs(ctx, chatID, text, replyTo, false)
+// send delivers a complete response as valid Telegram HTML chunks. Each
+// chunk stays within Telegram's parsed-visible message limit and the complete
+// reply within the 32K reply budget; delivery preserves order and stops on
+// the first unrecoverable chunk error.
+func (b *Bot) send(ctx context.Context, route Route, text string, replyTo int64) error {
+	for _, chunk := range markdownfmt.TelegramChunks(text) {
+		if err := b.sendChunk(ctx, route, chunk, replyTo); err != nil {
+			return err
+		}
+		// Reply parameters anchor only the first delivered text chunk.
+		replyTo = 0
+	}
+	return nil
+}
+
+// sendChunk delivers one HTML chunk. If and only if Telegram rejects the
+// chunk's entities or HTML parsing, the same chunk is retried once as plain
+// text without a parse mode; unrelated failures are never downgraded.
+func (b *Bot) sendChunk(ctx context.Context, route Route, chunk string, replyTo int64) error {
+	_, err := b.callRoute(ctx, route, "sendMessage", sendMessagePayload(route, chunk, replyTo, true))
+	if err == nil || !isTelegramEntityParseFailure(err) {
+		return err
+	}
+	_, err = b.callRoute(ctx, route, "sendMessage", sendMessagePayload(route, markdownfmt.TelegramChunkPlainText(chunk), replyTo, false))
 	return err
 }
 
-func (b *Bot) sendWithIDs(ctx context.Context, chatID, text string, replyTo int64, requireID bool) ([]string, error) {
-	var ids []string
-	for _, chunk := range telegramChunks(text, 4096) {
-		payload := map[string]any{"chat_id": chatID, "text": chunk, "parse_mode": "HTML", "disable_web_page_preview": true}
-		if replyTo > 0 {
-			payload["reply_parameters"] = map[string]any{"message_id": replyTo}
-		}
-		result, err := b.call(ctx, "sendMessage", payload)
-		if err != nil {
-			return nil, err
-		}
-		var sent struct {
-			MessageID int64 `json:"message_id"`
-		}
-		if json.Unmarshal(result, &sent) != nil || sent.MessageID <= 0 {
-			if requireID {
-				return nil, errors.New("Telegram sendMessage returned no message identifier")
-			}
-			continue
-		}
-		ids = append(ids, strconv.FormatInt(sent.MessageID, 10))
-		replyTo = 0
+// sendMessagePayload builds one sendMessage payload. Topic routes carry
+// message_thread_id; base and General routes omit it. html selects the HTML
+// parse mode; plain-text fallbacks omit it entirely.
+func sendMessagePayload(route Route, text string, replyTo int64, html bool) map[string]any {
+	payload := map[string]any{"chat_id": strconv.FormatInt(route.ChatID(), 10), "text": text, "disable_web_page_preview": true}
+	if html {
+		payload["parse_mode"] = "HTML"
 	}
-	return ids, nil
+	if threadID := route.ThreadID(); threadID != 0 {
+		payload["message_thread_id"] = threadID
+	}
+	if replyTo > 0 {
+		payload["reply_parameters"] = map[string]any{"message_id": replyTo}
+	}
+	return payload
 }
 
-func (b *Bot) sendAttachment(ctx context.Context, chatID string, attachment core.OutboundAttachment, replyTo int64) error {
+func (b *Bot) sendAttachment(ctx context.Context, route Route, attachment core.OutboundAttachment, replyTo int64) error {
 	if err := b.requireRuntimeAuthorization(); err != nil {
 		return err
 	}
@@ -747,7 +789,10 @@ func (b *Bot) sendAttachment(ctx context.Context, chatID string, attachment core
 	writer := multipart.NewWriter(pipe)
 	contentType := writer.FormDataContentType()
 	go func() {
-		writeErr := writer.WriteField("chat_id", chatID)
+		writeErr := writer.WriteField("chat_id", strconv.FormatInt(route.ChatID(), 10))
+		if writeErr == nil && route.ThreadID() != 0 {
+			writeErr = writer.WriteField("message_thread_id", strconv.FormatInt(route.ThreadID(), 10))
+		}
 		if writeErr == nil && replyTo > 0 {
 			writeErr = writer.WriteField("reply_parameters", fmt.Sprintf(`{"message_id":%d}`, replyTo))
 		}
@@ -768,7 +813,7 @@ func (b *Bot) sendAttachment(ctx context.Context, chatID string, attachment core
 		return err
 	}
 	request.Header.Set("Content-Type", contentType)
-	if err := b.requireRuntimeAuthorization(); err != nil {
+	if err := b.authorizeProviderRoute(route); err != nil {
 		return err
 	}
 	response, err := b.client.Do(request)
@@ -789,29 +834,13 @@ func (b *Bot) sendAttachment(ctx context.Context, chatID string, attachment core
 	return nil
 }
 
-func telegramChunks(markdownText string, limit int) []string {
-	if markdownText == "" || limit <= 0 {
-		return nil
+func (b *Bot) action(ctx context.Context, route Route, action string) error {
+	payload := map[string]any{"chat_id": strconv.FormatInt(route.ChatID(), 10), "action": action}
+	if threadID := route.ThreadID(); threadID != 0 {
+		payload["message_thread_id"] = threadID
 	}
-	queue := split(markdownText, max(1, limit/2))
-	var chunks []string
-	for len(queue) > 0 {
-		raw := queue[0]
-		queue = queue[1:]
-		formatted := markdownfmt.TelegramHTML(raw)
-		if len([]rune(formatted)) <= limit || len([]rune(raw)) <= 1 {
-			chunks = append(chunks, formatted)
-			continue
-		}
-		half := max(1, len([]rune(raw))/2)
-		parts := split(raw, half)
-		queue = append(parts, queue...)
-	}
-	return chunks
-}
-
-func (b *Bot) action(ctx context.Context, chatID, action string) error {
-	return b.post(ctx, "sendChatAction", map[string]any{"chat_id": chatID, "action": action})
+	_, err := b.callRoute(ctx, route, "sendChatAction", payload)
+	return err
 }
 
 func (b *Bot) post(ctx context.Context, method string, payload any) error {
@@ -823,10 +852,75 @@ func (b *Bot) call(ctx context.Context, method string, payload any) (json.RawMes
 	if err := b.requireRuntimeAuthorization(); err != nil {
 		return nil, err
 	}
-	return b.callProvider(ctx, method, payload)
+	return b.callProvider(ctx, method, payload, b.requireRuntimeAuthorization)
 }
 
-func (b *Bot) callProvider(ctx context.Context, method string, payload any) (json.RawMessage, error) {
+// callRoute authorizes one route-bound provider request immediately before
+// dispatch and again before its single bounded rate-limit retry.
+func (b *Bot) callRoute(ctx context.Context, route Route, method string, payload any) (json.RawMessage, error) {
+	authorize := func() error { return b.authorizeProviderRoute(route) }
+	if err := authorize(); err != nil {
+		return nil, err
+	}
+	return b.callProvider(ctx, method, payload, authorize)
+}
+
+// telegramAPIError is a typed Bot API response failure. It carries the
+// provider error code, description, and derived retry guidance without the
+// request URL, token, or message content. retryAfter is positive only for
+// rate-limit responses that supply a usable retry_after parameter; parse
+// marks an entity/HTML parse rejection.
+type telegramAPIError struct {
+	method      string
+	code        int
+	description string
+	retryAfter  time.Duration
+	parse       bool
+}
+
+func (e *telegramAPIError) Error() string {
+	return fmt.Sprintf("Telegram %s: %s", e.method, e.description)
+}
+
+// maxTelegramRetryAfter caps the retry delay accepted from a rate-limit
+// response. Larger or unusable delays fail closed instead of stalling
+// delivery, and the wait never loops: one bounded retry per provider call.
+const maxTelegramRetryAfter = 60 * time.Second
+
+// isTelegramEntityParseFailure reports whether the provider rejected the
+// message's HTML entities or tags. Only that failure class may downgrade a
+// chunk to plain text.
+func isTelegramEntityParseFailure(err error) bool {
+	var apiErr *telegramAPIError
+	return errors.As(err, &apiErr) && apiErr.parse
+}
+
+func (b *Bot) callProvider(ctx context.Context, method string, payload any, reauthorize func() error) (json.RawMessage, error) {
+	result, err := b.callProviderOnce(ctx, method, payload)
+	if err == nil {
+		return result, nil
+	}
+	var apiErr *telegramAPIError
+	if !errors.As(err, &apiErr) || apiErr.retryAfter <= 0 || apiErr.retryAfter > maxTelegramRetryAfter {
+		return nil, err
+	}
+	wait := b.retryWait
+	if wait == nil {
+		wait = waitWithContext
+	}
+	if waitErr := wait(ctx, apiErr.retryAfter); waitErr != nil {
+		return nil, waitErr
+	}
+	// Reapply the caller's authorization after the wait so a revocation or a
+	// recipient change during the delay cannot complete the retried provider
+	// call.
+	if err := reauthorize(); err != nil {
+		return nil, err
+	}
+	return b.callProviderOnce(ctx, method, payload)
+}
+
+func (b *Bot) callProviderOnce(ctx context.Context, method string, payload any) (json.RawMessage, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -845,14 +939,37 @@ func (b *Bot) callProvider(ctx context.Context, method string, payload any) (jso
 		OK          bool            `json:"ok"`
 		Result      json.RawMessage `json:"result"`
 		Description string          `json:"description"`
+		ErrorCode   int             `json:"error_code"`
+		Parameters  struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
 		return nil, err
 	}
-	if response.StatusCode != http.StatusOK || !envelope.OK {
-		return nil, fmt.Errorf("Telegram %s: %s", method, envelope.Description)
+	if response.StatusCode == http.StatusOK && envelope.OK {
+		return envelope.Result, nil
 	}
-	return envelope.Result, nil
+	apiErr := &telegramAPIError{method: method, code: envelope.ErrorCode, description: envelope.Description}
+	if envelope.ErrorCode == http.StatusTooManyRequests && envelope.Parameters.RetryAfter > 0 {
+		apiErr.retryAfter = time.Duration(envelope.Parameters.RetryAfter) * time.Second
+	}
+	if envelope.ErrorCode == http.StatusBadRequest && strings.Contains(strings.ToLower(envelope.Description), "can't parse entities") {
+		apiErr.parse = true
+	}
+	return nil, apiErr
+}
+
+// waitWithContext sleeps for the delay while honoring cancellation.
+func waitWithContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (b *Bot) endpoint(method string) string {
@@ -863,48 +980,26 @@ func (b *Bot) redact(err error) error {
 	return errors.New(strings.ReplaceAll(err.Error(), b.token, "<redacted>"))
 }
 
-func split(text string, limit int) []string {
-	runes := []rune(text)
-	if len(runes) == 0 {
-		return nil
-	}
-	var chunks []string
-	for len(runes) > limit {
-		cut := limit
-		for cut > limit/2 && runes[cut] != '\n' {
-			cut--
-		}
-		if cut <= limit/2 {
-			cut = limit
-		}
-		chunks = append(chunks, string(runes[:cut]))
-		runes = runes[cut:]
-	}
-	if len(runes) > 0 {
-		chunks = append(chunks, string(runes))
-	}
-	return chunks
-}
-
 type telegramUpdate struct {
 	UpdateID int64            `json:"update_id"`
 	Message  *telegramMessage `json:"message"`
 }
 
 type telegramMessage struct {
-	MessageID      int64             `json:"message_id"`
-	From           telegramUser      `json:"from"`
-	Chat           telegramChat      `json:"chat"`
-	Date           int64             `json:"date"`
-	Text           string            `json:"text"`
-	Caption        string            `json:"caption"`
-	Document       *telegramDocument `json:"document"`
-	Photo          []telegramPhoto   `json:"photo"`
-	Video          *telegramMedia    `json:"video"`
-	Audio          *telegramMedia    `json:"audio"`
-	Voice          *telegramMedia    `json:"voice"`
-	ReplyToMessage *telegramMessage  `json:"reply_to_message"`
-	NewChatMembers []telegramUser    `json:"new_chat_members"`
+	MessageID       int64             `json:"message_id"`
+	From            telegramUser      `json:"from"`
+	Chat            telegramChat      `json:"chat"`
+	Date            int64             `json:"date"`
+	Text            string            `json:"text"`
+	Caption         string            `json:"caption"`
+	Document        *telegramDocument `json:"document"`
+	Photo           []telegramPhoto   `json:"photo"`
+	Video           *telegramMedia    `json:"video"`
+	Audio           *telegramMedia    `json:"audio"`
+	Voice           *telegramMedia    `json:"voice"`
+	ReplyToMessage  *telegramMessage  `json:"reply_to_message"`
+	NewChatMembers  []telegramUser    `json:"new_chat_members"`
+	MessageThreadID int64             `json:"message_thread_id"`
 }
 
 type telegramUser struct {
