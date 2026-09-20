@@ -168,3 +168,30 @@ The manual workflow dispatch validated verification, packaging, standalone updat
 - Manual workflow dispatch `35479303799` passed verify and all four native build jobs for the exact release commit.
 - Release workflow `35479649967` passed verify and all four native build jobs and attached all expected assets.
 - The npm publish step prepared `@digitalygo/spynel@1.1.0` correctly and then failed with `ENEEDAUTH` because the publish job had no npm authentication.
+
+## Update 2026-09-20: v1.1.0 npm publication completed
+
+### Summary of changes
+
+Configured npm Trusted Publishing for the Digitalygo GitHub Actions release workflow and reran only the failed publish job. npm accepted `@digitalygo/spynel@1.1.0`, moved the `latest` distribution tag to `1.1.0`, and published signed provenance without a long-lived npm credential.
+
+### Technical reasoning
+
+The package owner completed npm's interactive 2FA-protected Trusted Publisher setup for repository `digitalygo/spynel`, workflow `release.yml`, and `npm publish` permission. The existing release job already had `id-token: write`, used a GitHub-hosted runner, and invoked a compatible npm CLI, so rerunning the failed job allowed npm to exchange the GitHub OIDC identity for a short-lived publish credential. The previously successful verification, native builds, and attached release assets remained authoritative and were not rebuilt.
+
+### Impact assessment
+
+- npm `latest` now resolves to `@digitalygo/spynel@1.1.0`.
+- The npm package retains the `spynel` command mapping and Digitalygo repository metadata.
+- Provenance uses the SLSA provenance v1 predicate and is recorded through npm's Sigstore-backed attestation flow.
+- No `NPM_TOKEN` repository secret or persistent publication credential exists.
+- The live home-workspace service now runs the managed npm `1.1.0` bundle instead of the temporary unmanaged local build. Telegram and Pi reconnected with model and reasoning inheritance preserved and Spynel task reviews still disabled.
+
+### Validation steps
+
+- Release workflow `35479649967`, attempt 2, completed successfully; only the failed publish job reran.
+- Registry inspection confirmed versions `1.0.0` and `1.1.0`, `latest` at `1.1.0`, the expected repository and binary metadata, and SLSA provenance v1.
+- A clean-prefix installation of exactly `@digitalygo/spynel@1.1.0` downloaded the checksum-verified native archive and returned `spynel 1.1.0`.
+- The global managed npm installation reports `@digitalygo/spynel@1.1.0`; the running primary executable resolves inside that package's vendor directory.
+- `spynel update --json check` reports npm source, current and latest `1.1.0`, and no available update.
+- The live status reports Telegram and Pi connected, an idle turn, inherited model, reasoning, and service settings, and task reviews set to `never`.
