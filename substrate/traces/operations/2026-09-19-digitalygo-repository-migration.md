@@ -1,7 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-19
-updated_at: 2026-09-19
+updated_at: 2026-09-20
 files_edited:
   - .github/AGENTS.md
   - .github/workflows/AGENTS.md
@@ -141,3 +141,30 @@ A granular npm token was used only for the bootstrap publication. npm accepted p
 - npm registry polling confirmed package name, version `1.0.0`, `latest` tag, repository coordinate, and `spynel` bin mapping.
 - A clean prefix installation of `@digitalygo/spynel@1.0.0` downloaded the native runtime and returned `spynel 1.0.0`.
 - The GitHub Actions `NPM_TOKEN` secret was deleted after the successful bootstrap publication.
+
+## Update 2026-09-20: v1.1.0 release assets and npm authentication blocker
+
+### Summary of changes
+
+Published the stable GitHub Release `v1.1.0` at commit `c3deb5322570417b32896a61d6ba7bf02c0d8e75` after a successful manual validation run on the same commit. The release workflow verified all four native targets and attached the four archives plus `checksums.txt`. npm publication did not complete because neither a trusted publisher nor an `NPM_TOKEN` credential was available to the publish job.
+
+### Technical reasoning
+
+Version `1.1.0` identifies the full Pi resource loading behavior as a backward-compatible feature release. The committed npm version remains `0.0.0-development`; release preparation derived `1.1.0` from the stable `v1.1.0` tag and pinned npm README links inside the workflow checkout.
+
+The manual workflow dispatch validated verification, packaging, standalone update behavior, multi-instance update behavior, and native evidence on Linux amd64 and arm64 plus macOS amd64 and arm64 without publishing. Publishing the GitHub Release then repeated those gates and uploaded the release assets before npm returned `ENEEDAUTH`. This confirms the previously documented account-side Trusted Publishing prerequisite remains unresolved.
+
+### Impact assessment
+
+- GitHub Release `v1.1.0` and its checksum-verified native assets are public.
+- `@digitalygo/spynel@1.1.0` is not yet present in the npm registry, and npm `latest` remains `1.0.0`.
+- Installing through the standalone GitHub bundle can obtain `1.1.0`; npm installations cannot update to it until publication succeeds.
+- No long-lived npm credential was added to the repository or GitHub Actions.
+- The publish job can be rerun after the npm package owner configures `digitalygo/spynel` and workflow `release.yml` as the trusted GitHub Actions publisher.
+
+### Validation steps
+
+- Local release gates passed: `scripts/dev.sh test`, `scripts/smoke.sh`, `npm run test:npm`, `npm pack --dry-run`, host native packaging, and extracted `spynel --version` execution.
+- Manual workflow dispatch `35479303799` passed verify and all four native build jobs for the exact release commit.
+- Release workflow `35479649967` passed verify and all four native build jobs and attached all expected assets.
+- The npm publish step prepared `@digitalygo/spynel@1.1.0` correctly and then failed with `ENEEDAUTH` because the publish job had no npm authentication.
