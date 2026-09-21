@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestHistoriesAreIndependentAndBounded(t *testing.T) {
@@ -301,5 +302,210 @@ func TestLatestReturnsMostRecentConversationForOneChannel(t *testing.T) {
 	}
 	if _, found, err := store.Latest("whatsapp"); err != nil || found {
 		t.Fatalf("missing latest conversation found = %t, err = %v", found, err)
+	}
+}
+
+func TestPromptContextCurrentOnlyCarriesCompleteFormatting(t *testing.T) {
+	store := New(t.TempDir())
+	at := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	current := Entry{At: at, Role: "user", Sender: "@ada", ReplyTo: "41 quoted text", Content: "current request", SourceMessageID: "local:current"}
+	prompt, path, err := store.PromptContext("telegram", "person", current, false, 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != store.Path("telegram", "person") {
+		t.Fatalf("prompt history path = %q", path)
+	}
+	want := "[2026-09-21T10:00:00Z] user (@ada): [reply_to: 41 quoted text] current request"
+	if prompt != want {
+		t.Fatalf("current-only prompt = %q, want %q", prompt, want)
+	}
+	// Requesting the seed with a zero message limit still delivers only the
+	// current entry.
+	seed, _, err := store.PromptContext("telegram", "person", current, true, 0, 10000)
+	if err != nil || seed != want {
+		t.Fatalf("zero-message-limit prompt = %q, %v", seed, err)
+	}
+}
+
+func TestPromptContextSeededWindowKeepsCurrentEntry(t *testing.T) {
+	store := New(t.TempDir())
+	base := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	for index := 1; index <= 10; index++ {
+		if _, err := store.Append("tui", "local", Entry{At: base.Add(time.Duration(index) * time.Second), Role: "user", Content: fmt.Sprintf("message-%02d", index), SourceMessageID: fmt.Sprintf("local:%02d", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := Entry{At: base.Add(10 * time.Second), Role: "user", Content: "message-10", SourceMessageID: "local:10"}
+	prompt, _, err := store.PromptContext("tui", "local", current, true, 3, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "message-08") || !strings.Contains(prompt, "message-10") || strings.Contains(prompt, "message-07") {
+		t.Fatalf("seeded prompt window = %q", prompt)
+	}
+}
+
+func TestPromptContextZeroLimitsAlwaysDeliverTheCurrentEntry(t *testing.T) {
+	store := New(t.TempDir())
+	at := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	if _, err := store.Append("cli", "local", Entry{At: at, Role: "user", Content: "older secret"}); err != nil {
+		t.Fatal(err)
+	}
+	current := Entry{At: at.Add(time.Minute), Role: "user", Sender: "cli", Content: "current request", SourceMessageID: "local:current"}
+	prompt, _, err := store.PromptContext("cli", "local", current, true, 0, 10000)
+	if err != nil || strings.Contains(prompt, "older secret") || !strings.Contains(prompt, "current request") {
+		t.Fatalf("zero message limit prompt = %q, %v", prompt, err)
+	}
+	unbounded, _, err := store.PromptContext("cli", "local", current, true, 50, 0)
+	if err != nil || unbounded != formatEntry(current) {
+		t.Fatalf("zero character limit prompt = %q, %v", unbounded, err)
+	}
+}
+
+func TestPromptContextBoundsOversizedCurrentContent(t *testing.T) {
+	store := New(t.TempDir())
+	at := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	current := Entry{At: at, Role: "user", Sender: "cli", Content: strings.Repeat("界", 200), SourceMessageID: "local:wide"}
+	prompt, _, err := store.PromptContext("cli", "local", current, false, 20, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(prompt) || len([]rune(prompt)) > 64 {
+		t.Fatalf("bounded prompt rune length = %d, valid %t", len([]rune(prompt)), utf8.ValidString(prompt))
+	}
+	if !strings.Contains(prompt, "…") || !strings.HasSuffix(prompt, strings.Repeat("界", 10)) {
+		t.Fatalf("oversized content was not tail-truncated behind an ellipsis: %q", prompt)
+	}
+}
+
+func TestPromptContextOmitsEntryWhoseReplyIdentityCannotFit(t *testing.T) {
+	store := New(t.TempDir())
+	at := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	current := Entry{At: at, Role: "user", ReplyTo: "123 nested quoted text", Content: strings.Repeat("界", 50), SourceMessageID: "local:reply"}
+	for _, limit := range []int{1, 5, 10, 17} {
+		prompt, _, err := store.PromptContext("telegram", "person", current, false, 20, limit)
+		if err != nil || prompt != "" {
+			t.Fatalf("tiny reply limit %d = %q, %v", limit, prompt, err)
+		}
+	}
+	if _, err := store.Append("telegram", "person", current); err != nil {
+		t.Fatal(err)
+	}
+	prompt, _, err := store.PromptContext("telegram", "person", current, true, 20, 17)
+	if err != nil || prompt != "" {
+		t.Fatalf("seeded tiny reply limit = %q, %v", prompt, err)
+	}
+}
+
+func TestPromptContextFallsBackWhenConcurrentAppendsPushOutTheCurrentEntry(t *testing.T) {
+	store := New(t.TempDir())
+	at := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	current := Entry{At: at, Role: "user", Content: "the original question", SourceMessageID: "local:question"}
+	if _, err := store.Append("tui", "local", current); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 5; index++ {
+		if _, err := store.Append("tui", "local", Entry{At: at.Add(time.Duration(index+1) * time.Second), Role: "assistant", Content: fmt.Sprintf("newer reply %d", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prompt, _, err := store.PromptContext("tui", "local", current, true, 2, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt != formatEntry(current) {
+		t.Fatalf("pushed-out current entry = %q, want current-only %q", prompt, formatEntry(current))
+	}
+}
+
+func TestPromptContextKeepsPlaceholderLikeContentLiteral(t *testing.T) {
+	store := New(t.TempDir())
+	current := Entry{At: time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC), Role: "user", Content: "keep {{RECENT_HISTORY}} and {{HISTORY_FILE}} literal", SourceMessageID: "local:literal"}
+	prompt, _, err := store.PromptContext("tui", "local", current, false, 0, 0)
+	if err != nil || !strings.Contains(prompt, "keep {{RECENT_HISTORY}} and {{HISTORY_FILE}} literal") {
+		t.Fatalf("placeholder-like content was rewritten: %q, %v", prompt, err)
+	}
+}
+
+func TestRenderBoundedEntryBranches(t *testing.T) {
+	at := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	prefix := formatEntry(Entry{At: at, Role: "user", Sender: "cli"})
+	fitting := Entry{At: at, Role: "user", Sender: "cli", Content: "short request"}
+	reply := Entry{At: at, Role: "user", Sender: "cli", ReplyTo: "41 quoted text", Content: strings.Repeat("界", 50)}
+	tests := []struct {
+		name  string
+		entry Entry
+		limit int
+		want  string
+	}{
+		{
+			name:  "non-positive limit keeps the complete formatted entry",
+			entry: fitting,
+			limit: 0,
+			want:  formatEntry(fitting),
+		},
+		{
+			name:  "entry exactly at the limit keeps complete formatting",
+			entry: fitting,
+			limit: len([]rune(formatEntry(fitting))),
+			want:  formatEntry(fitting),
+		},
+		{
+			name:  "oversized content keeps the prefix and newest runes",
+			entry: Entry{At: at, Role: "user", Sender: "cli", Content: strings.Repeat("x", 100)},
+			limit: 40,
+			want:  prefix + "…" + strings.Repeat("x", 4),
+		},
+		{
+			name:  "oversized multibyte content tail-bounds by runes",
+			entry: Entry{At: at, Role: "user", Sender: "cli", Content: strings.Repeat("界", 100)},
+			limit: 40,
+			want:  prefix + "…" + strings.Repeat("界", 4),
+		},
+		{
+			name:  "empty content over the limit omits the entry",
+			entry: Entry{At: at, Role: "user"},
+			limit: 10,
+			want:  "",
+		},
+		{
+			name:  "budget below the prefix falls back to the ellipsis tail",
+			entry: Entry{At: at, Role: "user", Content: "abcdef"},
+			limit: 10,
+			want:  "…abcdef",
+		},
+		{
+			name:  "tiny fallback budget keeps only the newest runes",
+			entry: Entry{At: at, Role: "user", Content: strings.Repeat("y", 20)},
+			limit: 5,
+			want:  "…yyyy",
+		},
+		{
+			name:  "reply identity that fits is bounded without splitting it",
+			entry: reply,
+			limit: 60,
+			want:  "[2026-09-21T10:00:00Z] user (cli): [reply_to: 41 quoted…] …",
+		},
+		{
+			name:  "reply identity that cannot fit omits the entry",
+			entry: reply,
+			limit: 17,
+			want:  "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := renderBoundedEntry(test.entry, test.limit)
+			if got != test.want {
+				t.Fatalf("renderBoundedEntry(%+v, %d) = %q, want %q", test.entry, test.limit, got, test.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("renderBoundedEntry(%+v, %d) = %q is not valid UTF-8", test.entry, test.limit, got)
+			}
+			if test.limit > 0 && len([]rune(got)) > test.limit {
+				t.Fatalf("renderBoundedEntry(%+v, %d) = %q exceeds the rune limit", test.entry, test.limit, got)
+			}
+		})
 	}
 }

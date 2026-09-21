@@ -361,6 +361,56 @@ func (p *Pi) IsActive(key string) bool {
 	return process.active != nil
 }
 
+// ProvidesConversationContext reports whether an ordinary send for key would
+// reuse a provider session that already retains this conversation. It runs
+// under the same per-key lock and policy computation as ensureProcess so the
+// capability answer and the dispatch path cannot drift. Any uncertainty,
+// closed process, missing session, stale policy, or unavailable session file
+// reports false so the caller safely seeds bounded history instead.
+func (p *Pi) ProvidesConversationContext(key string) bool {
+	lock := p.lockForKey(key)
+	lock.Lock()
+	defer lock.Unlock()
+	p.mu.Lock()
+	if p.closed || p.ctx == nil {
+		p.mu.Unlock()
+		return false
+	}
+	process := p.processes[key]
+	session, sessionOK := p.sessions[key]
+	policy := p.sessionPolicyLocked(p.config.Model, p.config.Effort)
+	p.mu.Unlock()
+	if process != nil {
+		process.mu.Lock()
+		active := process.active != nil
+		closed := process.closed
+		processSession := process.session
+		process.mu.Unlock()
+		if closed {
+			return false
+		}
+		if active {
+			// An active turn holds the conversation in provider memory even when
+			// a configuration commit changed the session policy.
+			return processSession.ID != "" && processSession.Path != ""
+		}
+		if processSession.Policy != policy {
+			return false
+		}
+		// A live idle process still retains the context even if its persisted
+		// session file was removed.
+		return true
+	}
+	if !sessionOK || session.ID == "" || session.Path == "" || session.Policy != policy {
+		return false
+	}
+	info, err := os.Stat(session.Path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return true
+}
+
 func (p *Pi) Close() error {
 	p.mu.Lock()
 	if p.closed {

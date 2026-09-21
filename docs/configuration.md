@@ -55,15 +55,15 @@ Telegram cannot mutate Telegram from a Telegram message, and WhatsApp cannot mut
 
 ## Workspace
 
-- `history_max_messages`: maximum newest entries injected into a harness prompt. `0` disables history injection.
-- `history_char_limit`: maximum total recent-history characters injected. `0` disables history injection.
+- `history_max_messages`: maximum newest entries seeded into a harness prompt when the provider session does not already retain the conversation. `0` disables prior-history seeding; the current user message is always delivered.
+- `history_char_limit`: maximum total characters for the seeded prior history; a positive value also bounds the current user entry. `0` disables prior-history seeding and leaves the current entry complete.
 - `attachment_max_mb`: maximum inbound or agent-sent Telegram/WhatsApp attachment size.
 
 The private runtime root is always `.spynel`; it is not a configuration setting. Configuration, histories, tasks, goals, prompts, themes, credentials, attachments, leases, and other runtime state live together beneath that directory.
 
-Prompt context is read backward from append-only JSONL and stops at both history limits. The TUI uses a separate fixed display tail, `/resume` discovers only metadata plus one preview entry per conversation, and branching copies on disk. An old conversation therefore does not have to live in RAM.
+Prompt context is read backward from append-only JSONL and stops at both history limits. Pi retains the provider conversation and manages its own context, so once a live or persisted Pi session retains the conversation, the prompt carries only the current user message plus the complete history path instead of repeating bounded history; a fresh session, a different harness, or any uncertain provider state receives the bounded seed. The current user message is always delivered, and zero limits disable only prior-history seeding. The TUI uses a separate fixed display tail, `/resume` discovers only metadata plus one preview entry per conversation, and branching copies on disk. An old conversation therefore does not have to live in RAM.
 
-Telegram and WhatsApp replies store a compact same-message reference as `reply_to`: the native referenced-message ID and, when supplied by the inbound event, up to 100 normalized Unicode characters of referenced text or caption. Recent prompt history labels it explicitly as `[reply_to: ...]`. The complete label and native ID take priority when the character limit requires truncation; a limit too small for that identity omits the newest history window instead of exposing a partial ID. Ordinary non-replies omit the field.
+Telegram and WhatsApp replies store a compact same-message reference as `reply_to`: the native referenced-message ID and, when supplied by the inbound event, up to 100 normalized Unicode characters of referenced text or caption. Recent prompt history labels it explicitly as `[reply_to: ...]`. The complete label and native ID take priority when the character limit requires truncation; a limit too small for that identity omits the affected entry instead of exposing a partial ID. Ordinary non-replies omit the field.
 
 `.spynel/attachments/` holds TUI attachments; remote media uses `.spynel/attachments/telegram/` and `.spynel/attachments/whatsapp/`. Treat all three as conversation data.
 

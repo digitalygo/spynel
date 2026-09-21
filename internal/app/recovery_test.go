@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -647,5 +648,55 @@ func TestConsolidatedTerminalCoversRapidFollowupSources(t *testing.T) {
 	}
 	if !covered["local:first"] || !covered["local:second"] {
 		t.Fatalf("consolidated terminal coverage = %#v", covered)
+	}
+}
+
+func TestNewestReservedEntrySelection(t *testing.T) {
+	base := time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		entries []history.Entry
+		want    history.Entry
+	}{
+		{
+			name: "empty slice returns the zero entry",
+			want: history.Entry{},
+		},
+		{
+			name:    "single entry is returned unchanged",
+			entries: []history.Entry{{At: base, AcceptedAt: base, Content: "only"}},
+			want:    history.Entry{At: base, AcceptedAt: base, Content: "only"},
+		},
+		{
+			name: "later acceptance wins over a later receive time",
+			entries: []history.Entry{
+				{At: base.Add(time.Minute), AcceptedAt: base, Content: "stale but later received"},
+				{At: base, AcceptedAt: base.Add(time.Second), Content: "newest accepted"},
+			},
+			want: history.Entry{At: base, AcceptedAt: base.Add(time.Second), Content: "newest accepted"},
+		},
+		{
+			name: "acceptance tie prefers the later receive time",
+			entries: []history.Entry{
+				{At: base, AcceptedAt: base, Content: "older receive"},
+				{At: base.Add(time.Second), AcceptedAt: base, Content: "later receive"},
+			},
+			want: history.Entry{At: base.Add(time.Second), AcceptedAt: base, Content: "later receive"},
+		},
+		{
+			name: "acceptance tie keeps an earlier receive time from displacing the incumbent",
+			entries: []history.Entry{
+				{At: base.Add(time.Second), AcceptedAt: base, Content: "later receive"},
+				{At: base, AcceptedAt: base, Content: "older receive"},
+			},
+			want: history.Entry{At: base.Add(time.Second), AcceptedAt: base, Content: "later receive"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := newestReservedEntry(test.entries); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("newestReservedEntry(%#v) = %#v, want %#v", test.entries, got, test.want)
+			}
+		})
 	}
 }

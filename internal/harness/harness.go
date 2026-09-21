@@ -283,6 +283,17 @@ type ConversationSender interface {
 	SendConversation(context.Context, string, string, string, core.Emit) (threadID string, steered bool, err error)
 }
 
+// ConversationContextProvider is an optional capability that reports whether
+// the provider session an ordinary send for key would use already retains this
+// conversation's context. Implementations must return false on absence,
+// uncertainty, I/O failure, stale policy, unsupported, or unavailable
+// provider state, and must never return an error: false always safely selects
+// the bounded-seed path. ThreadID and SessionInspector are not substitutes
+// because neither proves the provider can reuse the retained conversation.
+type ConversationContextProvider interface {
+	ProvidesConversationContext(key string) bool
+}
+
 type Harness interface {
 	Start(context.Context) error
 	Send(context.Context, string, string, core.Emit) (threadID string, steered bool, err error)

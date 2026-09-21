@@ -887,6 +887,26 @@ func (s *Supervisor) ImportSession(ctx context.Context, key, sessionID string) (
 	return importer.ImportSession(ctx, key, sessionID)
 }
 
+// ProvidesConversationContext forwards the optional provider-neutral
+// conversation-context capability. It snapshots the target under the mutex
+// and queries the adapter outside it. A closed supervisor, an unavailable
+// target, or a harness without the capability reports false so callers always
+// fall back to the safely bounded seed path.
+func (s *Supervisor) ProvidesConversationContext(key string) bool {
+	s.mu.RLock()
+	target := s.current
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed || target == nil {
+		return false
+	}
+	provider, ok := target.(ConversationContextProvider)
+	if !ok {
+		return false
+	}
+	return provider.ProvidesConversationContext(key)
+}
+
 func (s *Supervisor) Close() error {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()

@@ -528,9 +528,7 @@ func (s *Service) Handle(ctx context.Context, message core.Message, emit core.Em
 	recorded := false
 	var recordErr error
 	recordUser := func() error {
-		_, recordErr = s.History.Append(message.Channel, message.Conversation, history.Entry{
-			At: message.ReceivedAt, AcceptedAt: time.Now().UTC(), Role: "user", Sender: message.Sender, ReplyTo: message.ReplyTo, Content: redactSensitiveCommand(message.Text), SourceMessageID: message.SourceMessageID,
-		})
+		_, recordErr = s.History.Append(message.Channel, message.Conversation, userHistoryEntry(message, time.Now().UTC()))
 		recorded = recordErr == nil
 		return recordErr
 	}
@@ -593,6 +591,19 @@ func messageHookPayload(message core.Message) map[string]any {
 	return map[string]any{
 		"channel": message.Channel, "conversation": message.Conversation,
 		"sender": message.Sender, "text": message.Text, "reply_to": message.ReplyTo,
+	}
+}
+
+// userHistoryEntry builds the authoritative user record. Admission persists it
+// and prompt construction reuses the identical timestamp, role, sender,
+// reply_to, redacted content, and source identity so the delivered current
+// message can never drift from durable history.
+func userHistoryEntry(message core.Message, acceptedAt time.Time) history.Entry {
+	return history.Entry{
+		At: message.ReceivedAt, AcceptedAt: acceptedAt, Role: "user",
+		Sender: message.Sender, ReplyTo: message.ReplyTo,
+		Content:         redactSensitiveCommand(message.Text),
+		SourceMessageID: message.SourceMessageID,
 	}
 }
 
@@ -717,12 +728,28 @@ func (s *Service) creationCommandPrompt(message core.Message, kind, userMessage 
 }
 
 func (s *Service) chatPrompt(message core.Message) (string, error) {
+	return s.chatPromptWithCurrent(message, userHistoryEntry(message, time.Now().UTC()))
+}
+
+// chatPromptWithCurrent renders the communication prompt around one explicit
+// authoritative current user entry. Recovery supplies its newest reserved
+// user message instead of the synthetic recovery control text so the current
+// entry is always real user context.
+func (s *Service) chatPromptWithCurrent(message core.Message, current history.Entry) (string, error) {
 	cfg := s.Settings.Snapshot()
-	recent, fullPath, err := s.History.RecentBounded(message.Channel, message.Conversation, cfg.Workspace.HistoryMaxMessages, cfg.Workspace.HistoryCharLimit)
+	data, err := os.ReadFile(s.Config.StatePath("prompts", "chat.md"))
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(s.Config.StatePath("prompts", "chat.md"))
+	// Query the retained-context capability as late as practical so a session
+	// rotation shortly before dispatch is observed. Absence, uncertainty, or
+	// unsupported providers keep the bounded seed; a retained provider session
+	// receives only the current user entry.
+	includePriorHistory := true
+	if provider, ok := s.Harness.(harness.ConversationContextProvider); ok {
+		includePriorHistory = !provider.ProvidesConversationContext(sessionKey(message))
+	}
+	recent, fullPath, err := s.History.PromptContext(message.Channel, message.Conversation, current, includePriorHistory, cfg.Workspace.HistoryMaxMessages, cfg.Workspace.HistoryCharLimit)
 	if err != nil {
 		return "", err
 	}

@@ -340,6 +340,87 @@ func (s *Store) RecentBounded(channel, conversation string, messageLimit, charac
 	return result, path, nil
 }
 
+// PromptContext renders one bounded prompt window that always carries the
+// current user entry. includePriorHistory selects the ordinary bounded seed
+// used when the provider session does not retain this conversation; when it
+// is false, or either limit is non-positive, only the current entry is
+// delivered. Seeded mode pins the current entry by SourceMessageID: when
+// concurrent appends push it outside the bounded tail, the result degrades to
+// the current-only form instead of scanning unbounded history or substituting
+// another message. The full history path is returned in every mode.
+func (s *Store) PromptContext(channel, conversation string, current Entry, includePriorHistory bool, messageLimit, characterLimit int) (string, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := s.Path(channel, conversation)
+	if !includePriorHistory || messageLimit <= 0 || characterLimit <= 0 {
+		return renderBoundedEntry(current, characterLimit), path, nil
+	}
+	entries, err := readRecentEntries(path, messageLimit, characterLimit)
+	if err != nil {
+		return "", path, err
+	}
+	pinned := false
+	for _, entry := range entries {
+		if current.SourceMessageID != "" && entry.Role == "user" && entry.SourceMessageID == current.SourceMessageID {
+			pinned = true
+			break
+		}
+	}
+	if !pinned {
+		return renderBoundedEntry(current, characterLimit), path, nil
+	}
+	lines := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		lines = append(lines, formatEntry(entry))
+	}
+	// Apply the same final rune tail bound as RecentBounded so one oversized
+	// newest entry can never exceed the character window.
+	result := strings.Join(lines, "\n")
+	runes := []rune(result)
+	if len(runes) > characterLimit {
+		result = string(runes[len(runes)-characterLimit:])
+	}
+	return result, path, nil
+}
+
+// renderBoundedEntry renders one entry within a positive prompt character
+// limit. Entries that fit keep their complete formatted line; oversized
+// content is replaced by a leading ellipsis plus its newest runes, retaining
+// the formatted prefix while it fits. A reply identity that cannot fit
+// completely omits the entry rather than tail-slicing the identifier.
+func renderBoundedEntry(entry Entry, characterLimit int) string {
+	if characterLimit <= 0 {
+		return formatEntry(entry)
+	}
+	if formatted := formatEntry(entry); len([]rune(formatted)) <= characterLimit {
+		return formatted
+	}
+	if entry.ReplyTo != "" {
+		bounded, ok := boundNewestEntry(entry, characterLimit)
+		if !ok {
+			return ""
+		}
+		return formatEntry(bounded)
+	}
+	content := []rune(entry.Content)
+	if len(content) == 0 {
+		return ""
+	}
+	prefix := formatEntry(Entry{At: entry.At, Role: entry.Role, Sender: entry.Sender})
+	budget := characterLimit - len([]rune(prefix)) - 1
+	if budget < 1 {
+		budget = characterLimit - 1
+		if budget > len(content) {
+			budget = len(content)
+		}
+		return "…" + string(content[len(content)-budget:])
+	}
+	if budget > len(content) {
+		budget = len(content)
+	}
+	return prefix + "…" + string(content[len(content)-budget:])
+}
+
 // RecentEntries returns a bounded structured tail for TUI display without
 // loading the complete append-only conversation.
 func (s *Store) RecentEntries(channel, conversation string, messageLimit, characterLimit int) ([]Entry, string, error) {

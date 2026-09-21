@@ -7,7 +7,7 @@
 ## Local Contracts
 
 - Keep each channel/conversation independent, store complete durable JSONL with private permissions, and tolerate only explicitly handled tail corruption.
-- Build prompts backward from disk under both message and character limits; never load an unbounded history to compute bounded context.
+- `PromptContext` renders one bounded prompt window that always carries the current user entry and the full history path. Prior-history seeding is bounded backward from disk under both message and character limits and is disabled when either limit is non-positive or the provider session already retains the conversation; never load an unbounded history to compute bounded context. A non-positive character limit leaves the current entry complete, while a positive limit bounds it by rune tail with a leading ellipsis or omits an entry whose complete reply identity cannot fit. In seeded mode the current entry is pinned by source identity and degrades to the current-only form when concurrent appends push it outside the bounded tail.
 - Branch into a new conversation without mutating its source, retain bounded reply references, and exclude private attachment contents from records.
 - Append a recovery baseline to every branch so copied source messages remain context only and can never become stalled-message candidates in the new conversation.
 - Retention uses the last durable entry timestamp, falling back to file modification time only for empty histories; delete only strict pre-cutoff regular files and preserve explicitly protected live conversations while reporting per-item failures.

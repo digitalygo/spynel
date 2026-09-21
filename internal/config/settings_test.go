@@ -403,3 +403,15 @@ func TestRoutesAreNotASetting(t *testing.T) {
 		t.Fatal("retired setting accepted")
 	}
 }
+
+func TestHistorySettingsDescribeCurrentMessageGuarantee(t *testing.T) {
+	cfg := Default()
+	messages, ok := SettingByKey(cfg, "workspace.history_max_messages")
+	if !ok || !strings.Contains(messages.Description, "0 disables prior-history seeding") || !strings.Contains(messages.Description, "current message is always delivered") {
+		t.Fatalf("history message description = %#v, present %t", messages, ok)
+	}
+	characters, ok := SettingByKey(cfg, "workspace.history_char_limit")
+	if !ok || !strings.Contains(characters.Description, "bounds the current message when positive") {
+		t.Fatalf("history character description = %#v, present %t", characters, ok)
+	}
+}
