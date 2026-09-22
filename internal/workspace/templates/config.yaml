@@ -52,6 +52,8 @@ channels:
 
 speech:
   enabled: true
+  # elevenlabs uses the cloud API and falls back to local parakeet when its API key is missing or blank; parakeet runs locally.
+  provider: elevenlabs
   model_dir: ""
   language: en
   num_threads: 2

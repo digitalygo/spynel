@@ -61,7 +61,7 @@ func (e *cloudAPIError) Error() string {
 	return builder.String()
 }
 
-// ElevenLabs is the opt-in cloud speech-to-text backend. It streams the stored
+// ElevenLabs is the default cloud speech-to-text backend. It streams the stored
 // attachment to the ElevenLabs Speech-to-Text endpoint with the standard
 // library only, serializes one process-wide upload at a time, and never
 // initializes or downloads a local model.
@@ -108,7 +108,7 @@ func (e *ElevenLabs) Transcribe(ctx context.Context, request TranscriptionReques
 	keyName := strings.TrimSpace(cfg.ElevenLabsAPIKeyEnv)
 	key := strings.TrimSpace(os.Getenv(keyName))
 	if key == "" {
-		return "", errors.New("ElevenLabs API key environment variable " + sanitizeTranscriptionText(keyName, maxProviderCodeRunes) + " is not set")
+		return "", fmt.Errorf("ElevenLabs API key environment variable %s is not set: %w", sanitizeTranscriptionText(keyName, maxProviderCodeRunes), ErrSpeechAPIKeyMissing)
 	}
 	if request.DurationSeconds <= 0 {
 		return "", errors.New("ElevenLabs transcription requires the declared audio duration")

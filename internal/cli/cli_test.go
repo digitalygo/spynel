@@ -1742,35 +1742,65 @@ func TestStandaloneUpdateRestartAndProactiveEligibility(t *testing.T) {
 	}
 }
 
-type namedTranscriber struct{ name string }
+type stubTranscriber struct {
+	name  string
+	err   error
+	calls int
+}
 
-func (n namedTranscriber) Transcribe(context.Context, media.TranscriptionRequest) (string, error) {
-	return n.name, nil
+func (s *stubTranscriber) Transcribe(context.Context, media.TranscriptionRequest) (string, error) {
+	s.calls++
+	return s.name, s.err
 }
 
 func TestSpeechTranscriberSelectionFollowsLiveProviderSetting(t *testing.T) {
-	parakeet := namedTranscriber{name: "parakeet"}
-	elevenlabs := namedTranscriber{name: "elevenlabs"}
+	parakeet := &stubTranscriber{name: "parakeet"}
+	elevenlabs := &stubTranscriber{name: "elevenlabs"}
 	cfg := config.Default()
 
+	// The default provider is the cloud backend wrapped with the local
+	// fallback singleton.
 	selected := speechTranscriber(cfg.Speech, parakeet, elevenlabs)
 	text, err := selected.Transcribe(context.Background(), media.TranscriptionRequest{})
-	if err != nil || text != "parakeet" {
+	if err != nil || text != "elevenlabs" {
 		t.Fatalf("default provider selection = %q, %v", text, err)
 	}
 
+	// A missing or blank API key alone falls back to the local singleton.
+	missingKey := &stubTranscriber{name: "elevenlabs", err: fmt.Errorf("no key: %w", media.ErrSpeechAPIKeyMissing)}
+	selected = speechTranscriber(cfg.Speech, parakeet, missingKey)
+	text, err = selected.Transcribe(context.Background(), media.TranscriptionRequest{})
+	if err != nil || text != "parakeet" {
+		t.Fatalf("missing API key fallback = %q, %v", text, err)
+	}
+
+	// Every other cloud failure surfaces unchanged without the local backend.
+	cloudErr := errors.New("ElevenLabs speech-to-text returned HTTP 401")
+	refusing := &stubTranscriber{name: "elevenlabs", err: cloudErr}
+	localCalls := parakeet.calls
+	selected = speechTranscriber(cfg.Speech, parakeet, refusing)
+	if _, err = selected.Transcribe(context.Background(), media.TranscriptionRequest{}); !errors.Is(err, cloudErr) {
+		t.Fatalf("non-key cloud error = %v, want the primary error unchanged", err)
+	}
+	if parakeet.calls != localCalls {
+		t.Fatal("non-key cloud error consulted the local fallback")
+	}
+
 	// A live settings change re-wires the backend on the next channel build.
+	cfg.Speech.Provider = config.SpeechProviderParakeet
+	selected = speechTranscriber(cfg.Speech, parakeet, elevenlabs)
+	if selected != parakeet {
+		t.Fatal("explicit parakeet must return the plain local backend")
+	}
+	text, err = selected.Transcribe(context.Background(), media.TranscriptionRequest{})
+	if err != nil || text != "parakeet" {
+		t.Fatalf("switched local provider selection = %q, %v", text, err)
+	}
+
 	cfg.Speech.Provider = config.SpeechProviderElevenLabs
 	selected = speechTranscriber(cfg.Speech, parakeet, elevenlabs)
 	text, err = selected.Transcribe(context.Background(), media.TranscriptionRequest{})
 	if err != nil || text != "elevenlabs" {
-		t.Fatalf("cloud provider selection = %q, %v", text, err)
-	}
-
-	cfg.Speech.Provider = config.SpeechProviderParakeet
-	selected = speechTranscriber(cfg.Speech, parakeet, elevenlabs)
-	text, err = selected.Transcribe(context.Background(), media.TranscriptionRequest{})
-	if err != nil || text != "parakeet" {
 		t.Fatalf("switched back provider selection = %q, %v", text, err)
 	}
 
@@ -1783,6 +1813,7 @@ func TestSpeechTranscriberSelectionFollowsLiveProviderSetting(t *testing.T) {
 func TestSpeechCacheStartupFailureGatesOnlyLocalParakeet(t *testing.T) {
 	cacheErr := errors.New("cache unavailable")
 	cfg := config.Default()
+	cfg.Speech.Provider = config.SpeechProviderParakeet
 	if err := speechCacheStartupFailure(cfg.Speech, cacheErr); !errors.Is(err, cacheErr) {
 		t.Fatalf("local Parakeet without a model dir must abort: %v", err)
 	}

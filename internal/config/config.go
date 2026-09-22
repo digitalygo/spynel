@@ -30,8 +30,9 @@ const (
 	TaskNotificationsDecide = "decide"
 	TaskNotificationsAlways = "always"
 
-	// SpeechProviderParakeet is the default local transcription backend;
-	// SpeechProviderElevenLabs is the opt-in cloud backend. The catalog names
+	// SpeechProviderElevenLabs is the default cloud transcription backend,
+	// which falls back to the local backend when its API key is missing or
+	// blank; SpeechProviderParakeet is the local backend. The catalog names
 	// concrete implementations, never a generic "local".
 	SpeechProviderParakeet   = "parakeet"
 	SpeechProviderElevenLabs = "elevenlabs"
@@ -268,7 +269,7 @@ func Default() Config {
 			Telegram: Telegram{Name: "spynel", TokenEnv: "SPYNEL_TELEGRAM_TOKEN", Mode: "polling", WebhookListen: "127.0.0.1:8787", PollTimeoutSec: 30, GroupMode: "mention", WelcomeMessage: "Welcome, {name}!"},
 			WhatsApp: WhatsApp{Mode: "self-chat", Database: ".spynel/whatsapp.db", PollIntervalSec: 3},
 		},
-		Speech:  Speech{Enabled: true, Provider: SpeechProviderParakeet, ElevenLabsAPIKeyEnv: DefaultElevenLabsAPIKeyEnv, ElevenLabsModelID: ElevenLabsModelScribeV2, Language: "en", NumThreads: 2, MaxFileMB: 100, MaxDurationSec: 1800, ChunkSeconds: 600},
+		Speech:  Speech{Enabled: true, Provider: SpeechProviderElevenLabs, ElevenLabsAPIKeyEnv: DefaultElevenLabsAPIKeyEnv, ElevenLabsModelID: ElevenLabsModelScribeV2, Language: "en", NumThreads: 2, MaxFileMB: 100, MaxDurationSec: 1800, ChunkSeconds: 600},
 		Startup: Startup{},
 		Orchestrator: Orchestrator{
 			Enabled: true, IntervalSec: 10, RetriggerUnrespondedMessages: true, SemanticHeartbeatMinutes: 15, TaskNotifications: TaskNotificationsDecide, MaxParallel: 4,

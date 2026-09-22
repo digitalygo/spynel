@@ -1,6 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-22
+updated_at: 2026-09-22
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -26,13 +27,17 @@ files_edited:
   - internal/media/AGENTS.md
   - internal/media/elevenlabs.go
   - internal/media/elevenlabs_test.go
+  - internal/media/fallback.go
+  - internal/media/fallback_test.go
   - internal/media/parakeet.go
   - internal/media/parakeet_test.go
   - internal/media/store.go
   - internal/media/transcription.go
   - internal/media/transcription_test.go
+  - internal/workspace/templates/config.yaml
+  - internal/workspace/workspace_test.go
   - substrate/traces/operations/2026-09-22-elevenlabs-speech-transcription.md
-rationale: Record the opt-in ElevenLabs speech provider, the provider-neutral transcription contract, and the shared transcript markers, together with the DOX and user-documentation pass that keeps the contracts aligned with the implemented behavior.
+rationale: Record the ElevenLabs speech provider from its original opt-in introduction through its current default status with a sentinel-only missing-key fallback to local Parakeet, the provider-neutral transcription contract, and the shared transcript markers, together with the DOX and user-documentation passes that keep the contracts aligned with the implemented behavior.
 supporting_docs:
   - ../../../docs/configuration.md
   - ../../../docs/configuration-live-matrix.md
@@ -40,6 +45,9 @@ supporting_docs:
   - ../../../docs/troubleshooting.md
   - ../../../docs/architecture.md
   - ../../../internal/media/AGENTS.md
+  - ../../../AGENTS.md
+  - ../../../docs/AGENTS.md
+  - ../../../internal/config/AGENTS.md
   - https://elevenlabs.io/pricing
 ---
 
@@ -122,3 +130,45 @@ No authenticated live ElevenLabs canary was run, and none is claimed. The eviden
 - [Architecture](../../../docs/architecture.md)
 - [Media DOX](../../../internal/media/AGENTS.md)
 - [ElevenLabs pricing](https://elevenlabs.io/pricing)
+
+## Update 2026-09-22: default provider and key-missing fallback
+
+### Summary
+
+Speech transcription now defaults to the cloud `elevenlabs` provider, and a missing or blank API key environment variable at transcription time falls back to local Parakeet for that call. The fallback is sentinel-only: `media.ErrSpeechAPIKeyMissing` is the sole substitution condition, and invalid keys, rate limits, timeouts, network errors, empty transcripts, and every other provider outcome still surface as the ordinary failure marker. The startup model-cache check now applies only to explicit `speech.provider: parakeet`; a fallback call that finds an unusable local model reports the transcription-time failure marker instead. This update supersedes the no-fallback and local-default statements in the record above and captures the matching documentation and DOX reconciliation.
+
+### Technical reasoning
+
+The product decision makes the cloud backend the default while keeping local transcription reachable without configuration: a missing or blank `speech.elevenlabs_api_key_env` value selects the local Parakeet backend for that call, so a workspace without a key still transcribes when the local model is available.
+
+The fallback is deliberately narrow. The ElevenLabs client reports `ErrSpeechAPIKeyMissing` only for the missing-or-blank variable, and the `NewFallback` wrapper substitutes exactly on `errors.Is(err, ErrSpeechAPIKeyMissing)`. Invalid keys (HTTP 401), rate limits, timeouts, network errors, and empty transcripts are provider evidence that must not be hidden behind a local transcript, so they pass through unchanged. The ElevenLabs boundaries from the original work are untouched: fixed endpoint, redirect refusal, pre-upload size and duration gates, streamed multipart, bounded sanitized errors, and the single narrow rate-limit retry.
+
+The local-model startup cache gate keeps its original scope: it aborts startup only for explicit `parakeet` without an explicit `model_dir`. A missing-key fallback reuses the same local backend without re-gating startup, so a model problem in that path surfaces at transcription time as the ordinary failure marker. The fallback direction is one-way: local Parakeet never sends audio to the cloud.
+
+### Impact
+
+- Upgrade note (security-relevant): a pre-existing workspace that never wrote `speech.provider` decodes to the new `elevenlabs` default. If a non-empty `ELEVENLABS_API_KEY` is already visible to the running Spynel process, voice and audio messages start going to the ElevenLabs cloud API after upgrade without further action. Setting `speech.provider: parakeet` keeps transcription local. The security gate recorded that release notes must carry this behavior change; the user documentation and this record now state it.
+- Privacy and cost: with a key present, accepted audio goes to ElevenLabs by default; without a key, every accepted audio stays local through the fallback, which may download the local model at transcription time.
+- Startup gating: fail-closed. Only explicit `parakeet` gates startup on the local model cache, and no code path silently sends audio to the cloud when the key is absent. An unusable local model during a fallback fails at transcription time with the ordinary marker instead of disabling transcription or reaching the provider.
+- DOX drift: root `AGENTS.md`, `internal/AGENTS.md`, `internal/media/AGENTS.md`, `internal/config/AGENTS.md`, `docs/AGENTS.md`, `docs/architecture.md`, `docs/configuration.md`, `docs/configuration-live-matrix.md`, `docs/integrations.md`, and `docs/troubleshooting.md` now describe the default and the sentinel-only fallback. The package comment in `internal/media/elevenlabs.go` still calls the backend opt-in; this pass is documentation-only and left all Go code and tests untouched.
+
+### Validation
+
+Implementation and review evidence for this delta:
+
+- `scripts/dev.sh test` passed, covering the full Go suite plus the nested Bubble Tea module tests.
+- `go test -race -count=1 ./internal/media ./internal/cli` passed.
+- `go vet ./...` was clean.
+- `mkdir -p .tmp-bin && go build -o .tmp-bin/spynel ./cmd/spynel` succeeded.
+- `scripts/smoke.sh` passed.
+- `scripts/dev.sh dox` reported DOX coverage valid for 51 tracked directories.
+- Coverage over the new fallback wrapper: `internal/media/fallback.go` 100%.
+- Quality gate verdict: PASS with two non-blocking advisories.
+- Security gate verdict: PASS with three non-blocking advisories, including the release-notes requirement for the default-provider switch.
+
+Documentation pass checks run for this update on the completed tree:
+
+- `scripts/dev.sh dox` reported DOX coverage valid for 51 tracked directories.
+- `go test -count=1 ./internal/media ./internal/config ./internal/app ./internal/agentdocs` passed.
+- `git diff --check` reported no whitespace errors.
+- A structural Markdown scan of every added line across the changed files confirmed one H1 per file, uninterrupted heading progression, no em dash, no trailing whitespace, and a single trailing newline.

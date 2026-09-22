@@ -285,6 +285,9 @@ func TestElevenLabsMissingOrBlankEnvironmentKeyFailsWithoutRequest(t *testing.T)
 		if err == nil || !strings.Contains(err.Error(), "is not set") {
 			t.Fatalf("blank key error = %v", err)
 		}
+		if !errors.Is(err, ErrSpeechAPIKeyMissing) {
+			t.Fatalf("blank key error must report ErrSpeechAPIKeyMissing: %v", err)
+		}
 		assertNoSecretLeak(t, err)
 	})
 
@@ -296,6 +299,9 @@ func TestElevenLabsMissingOrBlankEnvironmentKeyFailsWithoutRequest(t *testing.T)
 		_, err := worker.Transcribe(context.Background(), TranscriptionRequest{Path: path, DurationSeconds: 5})
 		if err == nil || !strings.Contains(err.Error(), "ELEVENLABS_TEST_KEY_DEFINITELY_ABSENT") {
 			t.Fatalf("missing key error = %v", err)
+		}
+		if !errors.Is(err, ErrSpeechAPIKeyMissing) {
+			t.Fatalf("missing key error must report ErrSpeechAPIKeyMissing: %v", err)
 		}
 		assertNoSecretLeak(t, err)
 	})

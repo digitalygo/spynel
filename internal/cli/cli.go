@@ -1220,22 +1220,25 @@ func configFingerprint(value any) string {
 // speechTranscriber selects the current speech transcription backend inside
 // each channel build callback, so a live settings change re-wires the
 // transport through the existing cfg.Speech fingerprint. It returns nil when
-// transcription is disabled and never falls back from ElevenLabs to a local
-// model.
+// transcription is disabled. The cloud backend is wrapped so a missing or
+// blank API key alone falls back to the existing local Parakeet singleton;
+// every other cloud outcome passes through unchanged.
 func speechTranscriber(speech config.Speech, parakeet, elevenlabs media.Transcriber) media.Transcriber {
 	if !speech.Enabled {
 		return nil
 	}
 	if speech.Provider == config.SpeechProviderElevenLabs {
-		return elevenlabs
+		return media.NewFallback(elevenlabs, parakeet)
 	}
 	return parakeet
 }
 
 // speechCacheStartupFailure gates the local Parakeet model cache requirement.
-// The ElevenLabs backend never initializes, downloads, or falls back to a
-// local model, so a missing speech cache only aborts startup for the local
-// Parakeet backend without an explicit model directory.
+// The ElevenLabs backend never initializes or downloads a local model, so a
+// missing speech cache only aborts startup for the local Parakeet backend
+// without an explicit model directory. The missing-API-key fallback reuses
+// this local backend without re-gating startup here: model problems surface
+// at transcription time instead.
 func speechCacheStartupFailure(speech config.Speech, cacheErr error) error {
 	if cacheErr != nil && speech.Provider == config.SpeechProviderParakeet && speech.Enabled && strings.TrimSpace(speech.ModelDir) == "" {
 		return cacheErr

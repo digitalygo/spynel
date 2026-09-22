@@ -476,8 +476,8 @@ func TestStoreUpdateSavesAndReloadsSharedSnapshot(t *testing.T) {
 
 func TestSpeechProviderDefaultsAndNormalization(t *testing.T) {
 	cfg := Default()
-	if cfg.Speech.Provider != SpeechProviderParakeet {
-		t.Fatalf("default speech provider = %q, want %q", cfg.Speech.Provider, SpeechProviderParakeet)
+	if cfg.Speech.Provider != SpeechProviderElevenLabs {
+		t.Fatalf("default speech provider = %q, want %q", cfg.Speech.Provider, SpeechProviderElevenLabs)
 	}
 	if cfg.Speech.ElevenLabsAPIKeyEnv != DefaultElevenLabsAPIKeyEnv {
 		t.Fatalf("default API key env = %q, want %q", cfg.Speech.ElevenLabsAPIKeyEnv, DefaultElevenLabsAPIKeyEnv)
@@ -490,6 +490,20 @@ func TestSpeechProviderDefaultsAndNormalization(t *testing.T) {
 	}
 
 	root := t.TempDir()
+	// An existing workspace that never wrote the provider key keeps working: it
+	// decodes to the current default, whose missing API key falls back to the
+	// local Parakeet backend at transcription time.
+	omitted, err := Load(writeTestConfig(t, root, []byte("version: 1\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted.Speech.Provider != SpeechProviderElevenLabs {
+		t.Fatalf("omitted provider = %q, want %q", omitted.Speech.Provider, SpeechProviderElevenLabs)
+	}
+	if err := omitted.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
 	path := writeTestConfig(t, root, []byte("version: 1\nspeech:\n  provider: '  PARAKEET '\n  elevenlabs_model_id: ' Scribe_V1 '\n  elevenlabs_api_key_env: ' MY_KEY_1 '\n"))
 	loaded, err := Load(path)
 	if err != nil {

@@ -81,8 +81,8 @@ func TestInitCreatesDocumentedWorkspace(t *testing.T) {
 			t.Fatalf("initialized theme %q differs from built-in: loaded=%#v builtin=%#v", builtin.Name, loaded, builtin)
 		}
 	}
-	if !cfg.Speech.Enabled || cfg.Speech.Language != "en" || cfg.Speech.NumThreads != 2 {
-		t.Fatalf("initialized workspace must enable English Parakeet by default: %#v", cfg.Speech)
+	if !cfg.Speech.Enabled || cfg.Speech.Provider != config.SpeechProviderElevenLabs || cfg.Speech.Language != "en" || cfg.Speech.NumThreads != 2 {
+		t.Fatalf("initialized workspace must enable English cloud transcription by default: %#v", cfg.Speech)
 	}
 	if err := Init(root, false); err == nil {
 		t.Fatal("second init should require --force")
