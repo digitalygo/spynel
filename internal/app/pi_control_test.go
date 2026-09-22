@@ -38,9 +38,24 @@ type piControlHarness struct {
 	failSend      bool
 	suppressFinal int
 	reply         string
+	sendErr       error
+	steered       bool
+	sendThread    string
+	nameResult    harness.SessionNameResult
+	nameErr       error
 	sessionCalls  int
 	compactCalls  []string
 	importCalls   []string
+	nameCalls     []piNameCall
+}
+
+// piNameCall records one SetSessionName invocation so the automatic trigger
+// and `/pi name` can be asserted independently.
+type piNameCall struct {
+	key         string
+	expected    string
+	name        string
+	onlyIfEmpty bool
 }
 
 func newPiControlHarness() *piControlHarness {
@@ -73,6 +88,19 @@ func (h *piControlHarness) ImportSession(_ context.Context, key, sessionID strin
 	return h.info, nil
 }
 
+func (h *piControlHarness) SetSessionName(_ context.Context, key, expectedSessionID, name string, onlyIfEmpty bool) (harness.SessionNameResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nameCalls = append(h.nameCalls, piNameCall{key: key, expected: expectedSessionID, name: name, onlyIfEmpty: onlyIfEmpty})
+	if h.nameErr != nil {
+		return harness.SessionNameResult{}, h.nameErr
+	}
+	if h.nameResult == (harness.SessionNameResult{}) {
+		return harness.SessionNameResult{Name: name, Changed: true}, nil
+	}
+	return h.nameResult, nil
+}
+
 func (h *piControlHarness) Send(_ context.Context, key, prompt string, emit core.Emit) (string, bool, error) {
 	h.mu.Lock()
 	h.prompts[key] = append(h.prompts[key], prompt)
@@ -84,12 +112,18 @@ func (h *piControlHarness) Send(_ context.Context, key, prompt string, emit core
 	}
 	info, found := h.info, h.found
 	fail := h.failSend
+	sendErr := h.sendErr
+	steered := h.steered
+	sendThread := h.sendThread
 	reply := h.reply
 	suppress := h.suppressFinal > 0
 	if suppress {
 		h.suppressFinal--
 	}
 	h.mu.Unlock()
+	if sendErr != nil {
+		return "", false, sendErr
+	}
 	if fail {
 		emit(core.Event{Kind: core.EventError, Text: "provider failed", Done: true})
 		return "", false, nil
@@ -98,11 +132,19 @@ func (h *piControlHarness) Send(_ context.Context, key, prompt string, emit core
 	if found {
 		thread = info.ID
 	}
+	if sendThread != "" {
+		thread = sendThread
+	}
 	if suppress {
 		// A steered turn releases its predecessor with a nonterminal done
 		// status; only the successor's final response belongs to the user.
 		emit(core.Event{Kind: core.EventStatus, Text: "Response continued on a newer message", ThreadID: thread, Done: true})
 		return thread, false, nil
+	}
+	if steered {
+		text := "steered answer"
+		emit(core.Event{Kind: core.EventFinal, Text: text, FinalText: &text, ThreadID: thread, Done: true})
+		return thread, true, nil
 	}
 	text := "answer for " + key
 	if reply != "" {
@@ -151,8 +193,9 @@ func TestPiControlCatalogAndExactUsage(t *testing.T) {
 		catalog[command.Usage] = true
 	}
 	for _, usage := range []string{
-		"/pi session | /pi compact [instructions] | /pi import <full-session-id>",
+		"/pi session | /pi name <name> | /pi compact [instructions] | /pi import <full-session-id>",
 		"/pi session",
+		"/pi name <name>",
 		"/pi compact [instructions]",
 		"/pi import <full-session-id>",
 	} {
@@ -163,12 +206,12 @@ func TestPiControlCatalogAndExactUsage(t *testing.T) {
 	target := newPiControlHarness()
 	service := newPiControlService(t, target)
 	help := runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: "/help commands"})
-	for _, want := range []string{"`/pi session`", "`/pi compact [instructions]`", "`/pi import <full-session-id>`"} {
+	for _, want := range []string{"`/pi session`", "`/pi name <name>`", "`/pi compact [instructions]`", "`/pi import <full-session-id>`"} {
 		if !strings.Contains(help.Text, want) {
 			t.Errorf("command help is missing %q:\n%s", want, help.Text)
 		}
 	}
-	for _, text := range []string{"/pi", "/pi unknown", "/pi session extra", "/pi import", "/pi import one two"} {
+	for _, text := range []string{"/pi", "/pi unknown", "/pi session extra", "/pi name", "/pi import", "/pi import one two"} {
 		reply := runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: text})
 		if reply.Text != piCommandUsage {
 			t.Errorf("%s reply = %q, want %q", text, reply.Text, piCommandUsage)
@@ -193,7 +236,7 @@ func TestPiControlsRefuseRestrictedChannelsWithoutCapabilityCalls(t *testing.T) 
 		{Channel: "signal", Conversation: "unknown"},
 	}
 	for _, message := range restricted {
-		for _, text := range []string{"/pi session", "/pi compact", "/pi import " + piControlTestSession} {
+		for _, text := range []string{"/pi session", "/pi name renamed", "/pi compact", "/pi import " + piControlTestSession} {
 			message.Text = text
 			reply := runPiControlMessage(t, service, message)
 			if reply.Text != piControlsUnavailable {
@@ -388,9 +431,8 @@ func TestPiNewSessionNoticeStaysOnPrivateTelegramAndTUIOnly(t *testing.T) {
 		if strings.Contains(final.Text, "Pi session `") || strings.Contains(final.Text, piControlNewSession) {
 			t.Fatalf("%s/%s leaked the session notice: %q", message.Channel, message.Conversation, final.Text)
 		}
-		if target.sessionCalls != 0 {
-			t.Fatalf("%s/%s inspected sessions %d times", message.Channel, message.Conversation, target.sessionCalls)
-		}
+		// Automatic naming inspects the pre-dispatch session on every surface,
+		// but a blocked surface must still never disclose its identity.
 	}
 }
 

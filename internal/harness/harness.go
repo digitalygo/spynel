@@ -220,6 +220,27 @@ type SessionImporter interface {
 	ImportSession(ctx context.Context, key, sessionID string) (SessionInfo, error)
 }
 
+// SessionNameResult reports the effective provider session name after one
+// SetSessionName call. Name is the normalized value the provider reports
+// (never the raw request), and Changed reports whether that effective value
+// differs from the name observed before the call. A false Changed with a
+// nonempty Name means the provider already had that name and onlyIfEmpty
+// preserved it.
+type SessionNameResult struct {
+	Name    string
+	Changed bool
+}
+
+// SessionNamer is an optional capability that assigns a display name to an
+// existing conversation session. Implementations never create or rotate a
+// session: the current session identity must match expectedSessionID, and an
+// onlyIfEmpty request preserves and returns an existing provider name. The
+// capability is metadata-only, so callers may invoke it while a turn is
+// active and must treat failures as non-fatal.
+type SessionNamer interface {
+	SetSessionName(ctx context.Context, key, expectedSessionID, name string, onlyIfEmpty bool) (SessionNameResult, error)
+}
+
 // FollowUpMode describes how a harness accepts another user message while a
 // turn is active. Harnesses that do not implement FollowUpProvider are queued
 // conservatively by Supervisor, which makes a basic adapter safe by default.

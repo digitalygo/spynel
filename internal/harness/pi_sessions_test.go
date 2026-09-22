@@ -1145,3 +1145,285 @@ func TestPiSafeControlErrorPreservesSentinelIdentity(t *testing.T) {
 		t.Fatalf("sanitized error kept a sensitive path: %q", err.Error())
 	}
 }
+
+// piSeedSession starts one fixture adapter and completes one ordinary turn so
+// the conversation owns a real persisted session before naming is tested.
+func piSeedSession(t *testing.T, mode string) (*Pi, string, context.Context) {
+	t.Helper()
+	command, root, logPath := portableHarnessFixture(t, mode)
+	pi, err := NewPi(piSessionTestConfig(command, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := piSessionTestContext(t)
+	if err := pi.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pi.Close() })
+	done := make(chan struct{}, 1)
+	if _, _, err := pi.Send(ctx, "chat", "seed", func(event core.Event) {
+		if event.Done {
+			done <- struct{}{}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the seed turn")
+	}
+	return pi, logPath, ctx
+}
+
+func TestPiSetSessionNameNamesANewSession(t *testing.T) {
+	pi, logPath, ctx := piSeedSession(t, "pi-lifecycle")
+	before, ok, err := pi.SessionInfo("chat")
+	if err != nil || !ok || before.ID != "pi-session" {
+		t.Fatalf("seeded session = %#v, %t, %v", before, ok, err)
+	}
+	result, err := pi.SetSessionName(ctx, "chat", before.ID, "Fix the login flow", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "Fix the login flow" || !result.Changed {
+		t.Fatalf("SetSessionName result = %#v", result)
+	}
+	after, ok, err := pi.SessionInfo("chat")
+	if err != nil || !ok || after.ID != before.ID || after.Path != before.Path {
+		t.Fatalf("naming replaced the session: before %#v, after %#v, %v", before, after, err)
+	}
+	setRequests, stateRequests := 0, 0
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Kind != "request" {
+			continue
+		}
+		switch record.Method {
+		case "set_session_name":
+			setRequests++
+			var params struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(record.Params, &params); err != nil || params.Name != "Fix the login flow" {
+				t.Fatalf("set_session_name payload = %s, %v", record.Params, err)
+			}
+		case "get_state":
+			stateRequests++
+		}
+	}
+	if setRequests != 1 || stateRequests < 2 {
+		t.Fatalf("naming requests: set=%d state=%d", setRequests, stateRequests)
+	}
+}
+
+func TestPiSetSessionNameOnlyIfEmptyPreservesTheProviderName(t *testing.T) {
+	pi, logPath, ctx := piSeedSession(t, "pi-session-named")
+	before, _, _ := pi.SessionInfo("chat")
+	result, err := pi.SetSessionName(ctx, "chat", before.ID, "replacement name", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "existing provider name" || result.Changed {
+		t.Fatalf("only-if-empty result = %#v", result)
+	}
+	if after, _, _ := pi.SessionInfo("chat"); after != before {
+		t.Fatalf("only-if-empty naming changed the session: %#v -> %#v", before, after)
+	}
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Kind == "request" && record.Method == "set_session_name" {
+			t.Fatal("only-if-empty naming issued a rename request for an existing name")
+		}
+	}
+}
+
+func TestPiSetSessionNameRejectsAnIdentityMismatch(t *testing.T) {
+	pi, logPath, ctx := piSeedSession(t, "pi-lifecycle")
+	if _, err := pi.SetSessionName(ctx, "chat", "some-other-session", "Focus", false); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("identity-mismatch error = %v", err)
+	}
+	if stored := pi.ThreadID("chat"); stored != "pi-session" {
+		t.Fatalf("mismatched naming changed the stored session: %q", stored)
+	}
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Kind == "request" && record.Method == "set_session_name" {
+			t.Fatal("identity mismatch still reached set_session_name")
+		}
+	}
+}
+
+func TestPiSetSessionNameRejections(t *testing.T) {
+	t.Run("no session", func(t *testing.T) {
+		command, root, logPath := portableHarnessFixture(t, "pi-lifecycle")
+		pi, err := NewPi(piSessionTestConfig(command, root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := piSessionTestContext(t)
+		if err := pi.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		defer pi.Close()
+		if _, err := pi.SetSessionName(ctx, "chat", "pi-session", "Focus", true); err == nil || !strings.Contains(err.Error(), "first ordinary prompt") {
+			t.Fatalf("no-session error = %v", err)
+		}
+		for _, record := range readFixtureRecords(t, logPath) {
+			if record.Kind == "invocation" && !containsArgument(record.Args, "--version") {
+				t.Fatal("no-session naming started a provider process")
+			}
+		}
+	})
+
+	t.Run("missing stored file", func(t *testing.T) {
+		command, root, _ := portableHarnessFixture(t, "pi-lifecycle")
+		sessionsPath := filepath.Join(root, "sessions.json")
+		store, err := json.Marshal(map[string]piSession{"chat": {ID: "11111111-1111-1111-1111-111111111111", Path: filepath.Join(root, "missing.jsonl"), Policy: "ordinary"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sessionsPath, store, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pi, err := NewPi(piSessionTestConfig(command, root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := piSessionTestContext(t)
+		if err := pi.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		defer pi.Close()
+		if _, err := pi.SetSessionName(ctx, "chat", "11111111-1111-1111-1111-111111111111", "Focus", true); err == nil || !strings.Contains(err.Error(), "unavailable") {
+			t.Fatalf("missing-file error = %v", err)
+		}
+	})
+
+	t.Run("empty and invalid names", func(t *testing.T) {
+		pi, _, ctx := piSeedSession(t, "pi-lifecycle")
+		for _, name := range []string{"", "   ", string([]byte{0xff, 0xfe})} {
+			if _, err := pi.SetSessionName(ctx, "chat", "pi-session", name, false); err == nil || !strings.Contains(err.Error(), "nonempty valid UTF-8") {
+				t.Fatalf("invalid name %q error = %v", name, err)
+			}
+		}
+	})
+}
+
+func TestPiSetSessionNameReportsTheNormalizedProviderName(t *testing.T) {
+	pi, _, ctx := piSeedSession(t, "pi-lifecycle")
+	result, err := pi.SetSessionName(ctx, "chat", "pi-session", "  padded name  ", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "padded name" || !result.Changed {
+		t.Fatalf("normalized result = %#v", result)
+	}
+}
+
+func TestPiSetSessionNameWorksDuringAnActiveTurn(t *testing.T) {
+	command, root, _ := portableHarnessFixture(t, "pi-steer")
+	pi, err := NewPi(piSessionTestConfig(command, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := piSessionTestContext(t)
+	if err := pi.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer pi.Close()
+	delta := make(chan struct{}, 1)
+	if _, _, err := pi.Send(ctx, "chat", "hold", func(event core.Event) {
+		if event.Kind == core.EventDelta {
+			select {
+			case delta <- struct{}{}:
+			default:
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-delta:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the active Pi turn")
+	}
+	if !pi.IsActive("chat") {
+		t.Fatal("fixture turn is not active")
+	}
+	result, err := pi.SetSessionName(ctx, "chat", "pi-session", "live rename", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "live rename" || !result.Changed {
+		t.Fatalf("active-turn result = %#v", result)
+	}
+	second := make(chan core.Event, 16)
+	if _, steered, err := pi.Send(ctx, "chat", "second", func(event core.Event) { second <- event }); err != nil || !steered {
+		t.Fatalf("steered send after naming = steered %t, %v", steered, err)
+	}
+	var final core.Event
+	for !final.Done {
+		select {
+		case event := <-second:
+			if event.Done {
+				final = event
+			}
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for the steered turn")
+		}
+	}
+	if final.Kind != core.EventFinal || final.Text != "first second" {
+		t.Fatalf("turn outcome after naming = %#v", final)
+	}
+}
+
+func TestPiSetSessionNameResumesTheStoredSessionWithoutReplacement(t *testing.T) {
+	command, root, logPath := portableHarnessFixture(t, "pi-lifecycle")
+	config := piSessionTestConfig(command, root)
+	pi, err := NewPi(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := piSessionTestContext(t)
+	if err := pi.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{}, 1)
+	if _, _, err := pi.Send(ctx, "chat", "seed", func(event core.Event) {
+		if event.Done {
+			done <- struct{}{}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	stored := pi.ThreadID("chat")
+	if err := pi.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewPi(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if err := restarted.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := restarted.SetSessionName(ctx, "chat", stored, "resumed name", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "resumed name" || !result.Changed {
+		t.Fatalf("resumed naming result = %#v", result)
+	}
+	if after := restarted.ThreadID("chat"); after != stored {
+		t.Fatalf("resumed naming changed the stored session: %q -> %q", stored, after)
+	}
+	resumed := false
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Kind == "invocation" && containsArgument(record.Args, "--session") && containsArgument(record.Args, "--session-dir") {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatal("naming did not resume the stored session file")
+	}
+}

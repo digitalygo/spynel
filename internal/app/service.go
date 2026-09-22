@@ -43,6 +43,10 @@ type Service struct {
 	Settings        *config.Store
 	PairingControl  channel.PairingManager
 	DeliveryControl channel.DeliveryRouter
+	// ConversationLabels routes best-effort conversation label renames to the
+	// active channel generation. It is optional; naming still succeeds when no
+	// router is installed.
+	ConversationLabels channel.ConversationLabelRouter
 	// ConversationDelivery is the ordinary channel response path used by
 	// communication recovery; it is intentionally separate from Notify.
 	ConversationDelivery   channel.DeliveryRouter
@@ -644,10 +648,10 @@ func (s *Service) dispatchHarnessPrompt(ctx context.Context, message core.Messag
 	activity := newChatActivityEmitter(emit)
 	s.trackChatActivity(jobID, activity)
 	activity.start()
-	priorPiSession := ""
-	if piControlSurface(message) {
-		priorPiSession = s.currentPiSessionID(message)
-	}
+	// Capture the pre-dispatch session identity on every surface so an empty
+	// value always means the conversation had no prior session. Only the
+	// surface-gated disclosure and notice helpers may reveal an identity.
+	priorPiSession := s.currentPiSessionID(message)
 	wrapped := s.wrapEmit(message, jobID, activity.emit)
 	var threadID string
 	var steered bool
@@ -669,6 +673,7 @@ func (s *Service) dispatchHarnessPrompt(ctx context.Context, message core.Messag
 		return err
 	}
 	s.markPiSessionDisclosure(message, priorPiSession, threadID)
+	s.nameNewPiSession(ctx, message, priorPiSession, threadID, steered)
 	actualAdmission := "new"
 	if steered {
 		actualAdmission = "steered"
@@ -773,10 +778,9 @@ func (s *Service) chatPromptWithCurrent(message core.Message, current history.En
 func (s *Service) wrapEmit(message core.Message, jobID int, downstream core.Emit) core.Emit {
 	var terminalMu sync.Mutex
 	terminalDelivered := false
-	priorPiSession := ""
-	if piControlSurface(message) {
-		priorPiSession = s.currentPiSessionID(message)
-	}
+	// The same surface-independent capture applies here; the notice helper
+	// itself remains gated by piControlSurface.
+	priorPiSession := s.currentPiSessionID(message)
 	piNoticeSent := false
 	return func(event core.Event) {
 		terminal := event.Done && !event.Continues && (event.Kind == core.EventFinal || event.Kind == core.EventError)
@@ -1949,8 +1953,9 @@ var slashCommands = []core.SlashCommand{
 	{Value: "/title ", Usage: "/title <name>", Description: "Rename and persist this TUI window"},
 	{Value: "/new", Usage: "/new", Description: "Start a distinct TUI conversation and preserve this one"},
 	{Value: "/stop", Usage: "/stop", Description: "Stop the active execution for this conversation"},
-	{Value: "/pi", Usage: "/pi session | /pi compact [instructions] | /pi import <full-session-id>", Description: "Inspect or manage the Pi session from the TUI or a private Telegram chat"},
+	{Value: "/pi", Usage: "/pi session | /pi name <name> | /pi compact [instructions] | /pi import <full-session-id>", Description: "Inspect or manage the Pi session from the TUI or a private Telegram chat"},
 	{Value: "/pi session", Usage: "/pi session", Description: "Show the full Pi session ID and a safe direct Pi command"},
+	{Value: "/pi name ", Usage: "/pi name <name>", Description: "Name this conversation's Pi session and private Telegram topic"},
 	{Value: "/pi compact ", Usage: "/pi compact [instructions]", Description: "Compact this conversation's Pi session context"},
 	{Value: "/pi import ", Usage: "/pi import <full-session-id>", Description: "Fork an existing direct Pi session into this conversation"},
 	{Value: "/restart", Usage: "/restart", Description: "Restart Spynel and restore saved state"},

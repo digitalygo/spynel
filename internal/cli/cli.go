@@ -1205,6 +1205,7 @@ func startChannels(ctx context.Context, service *app.Service, report channel.Sta
 	supervisor.SetEventLogger(service.Runtime.LogEvent)
 	service.PairingControl = supervisor
 	service.DeliveryControl = supervisor
+	service.ConversationLabels = supervisor
 	service.SetConversationDelivery(supervisor)
 	done := make(chan error, 1)
 	go func() {

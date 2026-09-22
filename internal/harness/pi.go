@@ -92,6 +92,7 @@ type piWireMessage struct {
 type piState struct {
 	SessionFile   string `json:"sessionFile"`
 	SessionID     string `json:"sessionId"`
+	SessionName   string `json:"sessionName"`
 	IsStreaming   bool   `json:"isStreaming"`
 	ThinkingLevel string `json:"thinkingLevel"`
 	Model         struct {

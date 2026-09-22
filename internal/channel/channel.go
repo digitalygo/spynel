@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"unicode"
@@ -97,6 +98,25 @@ type Channel interface {
 type RuntimeAuthorizer interface {
 	ValidateRuntimeAuthorization() error
 	RevokeRuntimeAuthorization()
+}
+
+// ErrConversationLabelUnsupported reports that a channel or its active
+// generation cannot rename conversations. Callers treat it as a silent
+// no-op because conversation labels are best-effort metadata.
+var ErrConversationLabelUnsupported = errors.New("channel does not support conversation labels")
+
+// ConversationLabeler renames one provider-visible conversation label when a
+// transport represents conversations as named objects. Implementations
+// re-apply their own authorization and route rules; onlyIfImplicit limits the
+// automatic naming path to labels the transport still considers unset.
+type ConversationLabeler interface {
+	RenameConversation(ctx context.Context, conversation, label string, onlyIfImplicit bool) error
+}
+
+// ConversationLabelRouter routes a conversation label to the active
+// generation of a named channel.
+type ConversationLabelRouter interface {
+	RenameConversation(ctx context.Context, channelName, conversation, label string, onlyIfImplicit bool) error
 }
 
 // ProactiveDeliverer sends a complete assistant message after the inbound

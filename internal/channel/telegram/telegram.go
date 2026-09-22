@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/digitalygo/spynel/internal/channel"
 	"github.com/digitalygo/spynel/internal/config"
@@ -47,12 +49,35 @@ type Bot struct {
 	authLost          chan struct{}
 	authLostOnce      sync.Once
 	listen            func(string, string) (net.Listener, error)
+	topicTitleMu      sync.Mutex
+	topicTitles       map[topicTitleKey]topicTitleState
 	// retryWait sleeps out a provider-requested retry delay. Tests replace it
 	// to observe waits without real sleeping.
 	retryWait func(context.Context, time.Duration) error
 }
 
 var errTelegramRuntimeAuthorization = errors.New("Telegram runtime authorization is unavailable: allowed_users has no valid user")
+
+// Topic title tracking bounds. The state map is deliberately in-memory: a
+// fresh process starts with every topic unknown, so the automatic rename path
+// fails closed until the transport reports the topic again.
+const (
+	maxTopicLabelRunes    = 128
+	maxTrackedTopicTitles = 1024
+)
+
+type topicTitleKey struct {
+	chatID   int64
+	threadID int64
+}
+
+type topicTitleState uint8
+
+const (
+	topicTitleUnknown topicTitleState = iota
+	topicTitleImplicit
+	topicTitleExplicit
+)
 
 func New(cfg config.Telegram, token string) *Bot {
 	return NewWithIdentityStore(cfg, token, "")
@@ -63,7 +88,7 @@ func NewWithIdentityStore(cfg config.Telegram, token, identityPath string) *Bot 
 	if timeout < 20*time.Second {
 		timeout = 20 * time.Second
 	}
-	bot := &Bot{config: cfg, token: token, client: &http.Client{Timeout: timeout}, baseURL: "https://api.telegram.org", identity: NewIdentityStore(identityPath), authLost: make(chan struct{}), listen: net.Listen, proactiveActivity: map[string][]func(){}, retryWait: waitWithContext}
+	bot := &Bot{config: cfg, token: token, client: &http.Client{Timeout: timeout}, baseURL: "https://api.telegram.org", identity: NewIdentityStore(identityPath), authLost: make(chan struct{}), listen: net.Listen, proactiveActivity: map[string][]func(){}, retryWait: waitWithContext, topicTitles: map[topicTitleKey]topicTitleState{}}
 	bot.allowedUsers = func() []string { return cfg.AllowedUsers }
 	bot.activity = newTelegramActivity(bot, 4*time.Second)
 	return bot
@@ -396,7 +421,13 @@ func (b *Bot) processUpdate(ctx context.Context, handler channel.Handler, update
 		return
 	}
 	message := update.Message
-	if message == nil || !message.hasContent() || !b.allowed(message.From) {
+	if message == nil || !b.allowed(message.From) {
+		return
+	}
+	// Topic title service messages carry no ordinary content, so their
+	// transport state is recorded before the content filter below drops them.
+	b.trackTopicTitle(message)
+	if !message.hasContent() {
 		return
 	}
 	if message.Chat.Type == "private" && message.Chat.ID == message.From.ID {
@@ -574,6 +605,93 @@ func (b *Bot) messageRoute(message *telegramMessage) (Route, error) {
 		return NewGroupRoute(message.Chat.ID, message.MessageThreadID)
 	}
 	return NewPrivateRoute(message.From.ID, message.MessageThreadID)
+}
+
+// trackTopicTitle records the transport's own title state from a topic
+// service message. Telegram marks a still-implicit name explicitly, and any
+// edit that carries a name belongs to the user. Unknown senders and unknown
+// chats never reach this method because processUpdate checks the live
+// allow-list first.
+func (b *Bot) trackTopicTitle(message *telegramMessage) {
+	switch {
+	case message.ForumTopicCreated != nil:
+		state := topicTitleExplicit
+		if message.ForumTopicCreated.IsNameImplicit {
+			state = topicTitleImplicit
+		}
+		b.setTopicTitle(topicTitleKey{chatID: message.Chat.ID, threadID: message.MessageThreadID}, state)
+	case message.ForumTopicEdited != nil && strings.TrimSpace(message.ForumTopicEdited.Name) != "":
+		b.setTopicTitle(topicTitleKey{chatID: message.Chat.ID, threadID: message.MessageThreadID}, topicTitleExplicit)
+	}
+}
+
+// setTopicTitle stores one bounded tri-state value with simple eviction so a
+// long-lived process cannot grow the map without limit.
+func (b *Bot) setTopicTitle(key topicTitleKey, state topicTitleState) {
+	b.topicTitleMu.Lock()
+	defer b.topicTitleMu.Unlock()
+	if b.topicTitles == nil {
+		b.topicTitles = map[topicTitleKey]topicTitleState{}
+	}
+	if _, exists := b.topicTitles[key]; !exists && len(b.topicTitles) >= maxTrackedTopicTitles {
+		for existing := range b.topicTitles {
+			delete(b.topicTitles, existing)
+			break
+		}
+	}
+	b.topicTitles[key] = state
+}
+
+func (b *Bot) topicTitleState(key topicTitleKey) topicTitleState {
+	b.topicTitleMu.Lock()
+	defer b.topicTitleMu.Unlock()
+	return b.topicTitles[key]
+}
+
+// RenameConversation renames one private Telegram topic through
+// editForumTopic. Base chats, groups, malformed routes, and invalid labels
+// are rejected before any provider call. With onlyIfImplicit, the transport's
+// created/edited state must be known and still implicit; unknown or explicit
+// topics are a silent no-op success. Every provider call re-checks live
+// authorization through callRoute, including on its bounded retry.
+func (b *Bot) RenameConversation(ctx context.Context, conversation, label string, onlyIfImplicit bool) error {
+	route, err := ParseConversation(conversation)
+	if err != nil {
+		return errors.New("invalid Telegram conversation origin")
+	}
+	if route.IsGroup() || route.ThreadID() < 2 {
+		return fmt.Errorf("conversation labels apply only to private Telegram topics: %w", channel.ErrConversationLabelUnsupported)
+	}
+	label = strings.TrimSpace(label)
+	if !utf8.ValidString(label) || label == "" || utf8.RuneCountInString(label) > maxTopicLabelRunes {
+		return fmt.Errorf("Telegram topic names must be nonempty valid UTF-8 of at most %d characters", maxTopicLabelRunes)
+	}
+	if strings.ContainsFunc(label, unicode.IsControl) {
+		return errors.New("Telegram topic names must be a single line without control characters")
+	}
+	key := topicTitleKey{chatID: route.ChatID(), threadID: route.ThreadID()}
+	if onlyIfImplicit && b.topicTitleState(key) != topicTitleImplicit {
+		return nil
+	}
+	payload := map[string]any{
+		"chat_id":           strconv.FormatInt(route.ChatID(), 10),
+		"message_thread_id": route.ThreadID(),
+		"name":              label,
+	}
+	if _, err := b.callRoute(ctx, route, "editForumTopic", payload); err != nil {
+		if !isTopicNotModified(err) {
+			return err
+		}
+	}
+	b.setTopicTitle(key, topicTitleExplicit)
+	return nil
+}
+
+// isTopicNotModified reports the provider's idempotent re-rename rejection,
+// which is the only 400 that already proves the requested title is live.
+func isTopicNotModified(err error) bool {
+	var apiErr *telegramAPIError
+	return errors.As(err, &apiErr) && apiErr.code == http.StatusBadRequest && strings.Contains(apiErr.description, "TOPIC_NOT_MODIFIED")
 }
 
 func (b *Bot) welcome(ctx context.Context, message *telegramMessage) {
@@ -1000,6 +1118,24 @@ type telegramMessage struct {
 	ReplyToMessage  *telegramMessage  `json:"reply_to_message"`
 	NewChatMembers  []telegramUser    `json:"new_chat_members"`
 	MessageThreadID int64             `json:"message_thread_id"`
+
+	ForumTopicCreated *telegramForumTopicCreated `json:"forum_topic_created"`
+	ForumTopicEdited  *telegramForumTopicEdited  `json:"forum_topic_edited"`
+}
+
+// telegramForumTopicCreated mirrors the Bot API shape that reports a new
+// forum topic. IsNameImplicit is optional; when absent the creator supplied
+// the name, so the topic counts as explicit and the automatic path skips it.
+type telegramForumTopicCreated struct {
+	Name           string `json:"name"`
+	IsNameImplicit bool   `json:"is_name_implicit"`
+}
+
+// telegramForumTopicEdited mirrors the Bot API shape that reports an edited
+// forum topic. An icon-only edit carries no name and leaves the tracked state
+// unchanged.
+type telegramForumTopicEdited struct {
+	Name string `json:"name"`
 }
 
 type telegramUser struct {

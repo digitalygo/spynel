@@ -53,6 +53,99 @@ func (p *Pi) SessionInfo(key string) (SessionInfo, bool, error) {
 	return SessionInfo{ID: session.ID, Path: session.Path, Command: command}, true, nil
 }
 
+// SetSessionName assigns one display name to an existing conversation
+// session through Pi RPC. It runs under the conversation's per-key lock,
+// reuses a matching live process even during an active turn, and otherwise
+// resumes the exact stored session, so naming never creates or rotates
+// provider state. The returned name is the effective provider value read
+// back from get_state after the call; onlyIfEmpty preserves and returns an
+// existing provider name without issuing a rename request.
+func (p *Pi) SetSessionName(ctx context.Context, key, expectedSessionID, name string, onlyIfEmpty bool) (SessionNameResult, error) {
+	if !utf8.ValidString(name) || strings.TrimSpace(name) == "" {
+		return SessionNameResult{}, errors.New("Pi session name must be nonempty valid UTF-8")
+	}
+	lock := p.lockForKey(key)
+	lock.Lock()
+	defer lock.Unlock()
+	p.mu.Lock()
+	if p.closed || p.ctx == nil {
+		p.mu.Unlock()
+		return SessionNameResult{}, errors.New("Pi harness is not running")
+	}
+	cfg := p.config
+	session := p.sessions[key]
+	process := p.processes[key]
+	p.mu.Unlock()
+	if session.ID == "" || session.Path == "" {
+		return SessionNameResult{}, errors.New("no Pi session exists yet; the first ordinary prompt creates one")
+	}
+	if expectedSessionID == "" || session.ID != expectedSessionID {
+		return SessionNameResult{}, errors.New("the current Pi session does not match the expected session")
+	}
+	if info, err := os.Stat(session.Path); err != nil || !info.Mode().IsRegular() {
+		return SessionNameResult{}, errors.New("the stored Pi session file is unavailable")
+	}
+	// A live process that already serves the expected session is reused even
+	// while its turn is active: naming is metadata-only and must never
+	// interrupt provider work. Session identity is authoritative here; a
+	// concurrently committed model or effort change cannot redirect the exact
+	// session the caller named.
+	if !piProcessServesSession(process, expectedSessionID) {
+		resumed, err := p.resumeExistingProcess(ctx, key, session)
+		if err != nil {
+			return SessionNameResult{}, err
+		}
+		process = resumed
+	}
+	state, err := p.readPiState(ctx, process, session, cfg)
+	if err != nil {
+		return SessionNameResult{}, err
+	}
+	if state.SessionID != expectedSessionID {
+		return SessionNameResult{}, errors.New("the current Pi session does not match the expected session")
+	}
+	if onlyIfEmpty && strings.TrimSpace(state.SessionName) != "" {
+		return SessionNameResult{Name: state.SessionName, Changed: false}, nil
+	}
+	sensitive := append([]string{name, session.Path}, p.piControlSensitivePaths(cfg)...)
+	if _, err := process.call(ctx, map[string]any{"type": "set_session_name", "name": name}, nil); err != nil {
+		return SessionNameResult{}, fmt.Errorf("Pi rejected the session name: %w", piSafeControlError(err, sensitive...))
+	}
+	after, err := p.readPiState(ctx, process, session, cfg)
+	if err != nil {
+		return SessionNameResult{}, err
+	}
+	if after.SessionID != expectedSessionID {
+		return SessionNameResult{}, errors.New("the current Pi session does not match the expected session")
+	}
+	return SessionNameResult{Name: after.SessionName, Changed: after.SessionName != state.SessionName}, nil
+}
+
+// piProcessServesSession reports whether one cached live process already
+// serves exactly the expected provider session.
+func piProcessServesSession(process *piProcess, expectedSessionID string) bool {
+	if process == nil {
+		return false
+	}
+	process.mu.Lock()
+	defer process.mu.Unlock()
+	return !process.closed && process.session.ID == expectedSessionID
+}
+
+// readPiState performs one bounded RPC get_state through an existing process
+// and validates that it reported a session identity.
+func (p *Pi) readPiState(ctx context.Context, process *piProcess, session piSession, cfg HarnessConfig) (piState, error) {
+	data, err := process.call(ctx, map[string]any{"type": "get_state"}, nil)
+	if err != nil {
+		return piState{}, fmt.Errorf("read Pi session state: %w", piSafeControlError(err, append([]string{session.Path}, p.piControlSensitivePaths(cfg)...)...))
+	}
+	var state piState
+	if err := json.Unmarshal(data, &state); err != nil || state.SessionID == "" {
+		return piState{}, errors.New("Pi returned an incompatible get_state result")
+	}
+	return state, nil
+}
+
 // CompactSession performs one manual compaction through Pi RPC. It is
 // idle-only and resumes an existing persisted session when no process is
 // running; it never creates a session and never replaces the stored file.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/digitalygo/spynel/internal/channel/telegram"
@@ -14,7 +15,12 @@ import (
 
 // piCommandUsage is the exact usage reply for a missing or unknown
 // subcommand; every `/pi` surface returns it unchanged.
-const piCommandUsage = "Usage: /pi session | /pi compact [instructions] | /pi import <full-session-id>"
+const piCommandUsage = "Usage: /pi session | /pi name <name> | /pi compact [instructions] | /pi import <full-session-id>"
+
+// piSessionNameMaxRunes bounds one explicit session name after edge
+// trimming. The Telegram topic adapter independently enforces its own label
+// bound when the same name is applied to a topic.
+const piSessionNameMaxRunes = 128
 
 const (
 	piControlsUnavailable = "Pi session controls are available only in the local TUI and private Telegram conversations."
@@ -130,6 +136,8 @@ func (s *Service) piCommand(ctx context.Context, message core.Message, remainder
 			return s.localReply(message, piCommandUsage, emit)
 		}
 		return s.piSessionCommand(message, emit)
+	case "name":
+		return s.piNameCommand(ctx, message, strings.TrimSpace(strings.TrimPrefix(remainder, fields[0])), emit)
 	case "compact":
 		return s.piCompactCommand(ctx, message, strings.TrimSpace(strings.TrimPrefix(remainder, fields[0])), emit)
 	case "import":
@@ -158,6 +166,65 @@ func (s *Service) piSessionCommand(message core.Message, emit core.Emit) error {
 		return s.localReply(message, "No Pi session exists for this conversation yet. The first ordinary prompt creates one.", emit)
 	}
 	return s.localReply(message, piSessionReply(info), emit)
+}
+
+// piNameCommand assigns one explicit display name to an existing Pi session.
+// It never creates a session, is safe during an active turn, and additionally
+// renames a private Telegram topic so an explicitly named session can replace
+// an implicit topic title. A failed topic rename reports partial success and
+// never rolls the provider name back.
+func (s *Service) piNameCommand(ctx context.Context, message core.Message, name string, emit core.Emit) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return s.localReply(message, piCommandUsage, emit)
+	}
+	if !utf8.ValidString(name) {
+		return s.localReply(message, "Pi session names must be valid UTF-8.", emit)
+	}
+	if utf8.RuneCountInString(name) > piSessionNameMaxRunes {
+		return s.localReply(message, fmt.Sprintf("Pi session names must be at most %d characters.", piSessionNameMaxRunes), emit)
+	}
+	if strings.ContainsFunc(name, unicode.IsControl) {
+		return s.localReply(message, "Pi session names must be a single line without control characters.", emit)
+	}
+	inspector, ok := s.Harness.(harness.SessionInspector)
+	if !ok {
+		return s.localReply(message, piControlsUnsupported, emit)
+	}
+	info, found, err := inspector.SessionInfo(sessionKey(message))
+	if err != nil {
+		if errors.Is(err, harness.ErrSessionControlsUnsupported) {
+			return s.localReply(message, piControlsUnsupported, emit)
+		}
+		return s.piControlFailure(message, "Cannot inspect the Pi session: ", err, emit)
+	}
+	if !found {
+		return s.localReply(message, "No Pi session exists for this conversation yet. The first ordinary prompt creates one.", emit)
+	}
+	namer, ok := s.Harness.(harness.SessionNamer)
+	if !ok {
+		return s.localReply(message, piControlsUnsupported, emit)
+	}
+	result, err := namer.SetSessionName(ctx, sessionKey(message), info.ID, name, false)
+	if err != nil {
+		if errors.Is(err, harness.ErrSessionControlsUnsupported) {
+			return s.localReply(message, piControlsUnsupported, emit)
+		}
+		return s.piControlFailure(message, "Cannot name the Pi session: ", err, emit)
+	}
+	effective := result.Name
+	if effective == "" {
+		effective = name
+	}
+	reply := "Pi session renamed to `" + effective + "`."
+	if route, routeErr := telegram.ParseConversation(message.Conversation); message.Channel == "telegram" && routeErr == nil && !route.IsGroup() && route.ThreadID() >= 2 && s.ConversationLabels != nil {
+		if renameErr := s.ConversationLabels.RenameConversation(ctx, message.Channel, message.Conversation, effective, false); renameErr != nil {
+			reply = "Pi session renamed to `" + effective + "`, but the Telegram topic could not be renamed: " + harness.SafeControlErrorText(renameErr)
+		} else {
+			reply = "Pi session renamed to `" + effective + "` and the Telegram topic was renamed."
+		}
+	}
+	return s.localReply(message, reply, emit)
 }
 
 func (s *Service) piCompactCommand(ctx context.Context, message core.Message, instructions string, emit core.Emit) error {

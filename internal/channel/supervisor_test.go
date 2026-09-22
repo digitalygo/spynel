@@ -413,3 +413,48 @@ observedError:
 	supervisor.stopAll()
 	supervisor.wait.Wait()
 }
+
+type labelFixture struct {
+	conversation   string
+	label          string
+	onlyIfImplicit bool
+	err            error
+}
+
+func (c *labelFixture) Name() string { return "telegram" }
+
+func (c *labelFixture) Run(ctx context.Context, _ Handler) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (c *labelFixture) RenameConversation(_ context.Context, conversation, label string, onlyIfImplicit bool) error {
+	c.conversation, c.label, c.onlyIfImplicit = conversation, label, onlyIfImplicit
+	return c.err
+}
+
+func TestSupervisorRoutesConversationLabelsToTheActiveGeneration(t *testing.T) {
+	fixture := &labelFixture{}
+	supervisor := NewSupervisor(nil, nil, nil, nil, nil)
+	supervisor.running["telegram"] = &runningChannel{instance: fixture}
+	if err := supervisor.RenameConversation(context.Background(), "telegram", "TG-7-topic-5", "Release", true); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.conversation != "TG-7-topic-5" || fixture.label != "Release" || !fixture.onlyIfImplicit {
+		t.Fatalf("routed label = %#v", fixture)
+	}
+	if err := supervisor.RenameConversation(context.Background(), "telegram", "TG-7-topic-5", "Release", false); err != nil || fixture.onlyIfImplicit {
+		t.Fatalf("forced routed label = %#v, %v", fixture, err)
+	}
+}
+
+func TestSupervisorConversationLabelsFailClosedForMissingOrUnsupportedChannels(t *testing.T) {
+	supervisor := NewSupervisor(nil, nil, nil, nil, nil)
+	if err := supervisor.RenameConversation(context.Background(), "telegram", "TG-7-topic-5", "Release", true); err == nil || !errors.Is(err, ErrConversationLabelUnsupported) {
+		t.Fatalf("missing channel error = %v", err)
+	}
+	supervisor.running["telegram"] = &runningChannel{instance: &supervisedFixture{name: "telegram"}}
+	if err := supervisor.RenameConversation(context.Background(), "telegram", "TG-7-topic-5", "Release", true); err == nil || !errors.Is(err, ErrConversationLabelUnsupported) {
+		t.Fatalf("unsupported channel error = %v", err)
+	}
+}

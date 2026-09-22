@@ -170,7 +170,7 @@ func runHarnessFixture(mode string) int {
 		return runCodexFixture(mode)
 	case "claude-stream", "claude-steer", "claude-text", "claude-interrupt", "claude-help-missing-flag", "claude-init-changed-event", "claude-terminal-error", "claude-result-nonzero":
 		return runClaudeFixture(mode)
-	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath":
+	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath", "pi-session-named":
 		return runPiFixture(mode)
 	case "acp-lifecycle", "acp-interrupt", "acp-version-mismatch", "acp-session-error":
 		return runACPFixture(mode)
@@ -196,6 +196,12 @@ func runPiFixture(mode string) int {
 	currentModel := "model-a"
 	if mode == "pi-off-default" {
 		currentModel = "model-off"
+	}
+	// The fixture mirrors Pi's own trim normalization for session names so
+	// readback proves the adapter reports the provider's effective value.
+	sessionName := ""
+	if mode == "pi-session-named" {
+		sessionName = "existing provider name"
 	}
 	sessionDir, forkPath, sessionArg := "", "", ""
 	for index, arg := range args {
@@ -289,8 +295,23 @@ func runPiFixture(mode string) int {
 				} else if currentModel == "model-max" {
 					thinkingLevel = "max"
 				}
-				respond(message, map[string]any{"sessionId": sessionID, "sessionFile": sessionFile, "isStreaming": false, "thinkingLevel": thinkingLevel, "model": map[string]any{"id": currentModel, "provider": "fixture"}})
+				state := map[string]any{"sessionId": sessionID, "sessionFile": sessionFile, "isStreaming": false, "thinkingLevel": thinkingLevel, "model": map[string]any{"id": currentModel, "provider": "fixture"}}
+				if sessionName != "" {
+					state["sessionName"] = sessionName
+				}
+				respond(message, state)
 			}
+		case "set_session_name":
+			var params struct {
+				Name string `json:"name"`
+			}
+			_ = json.Unmarshal(scanner.Bytes(), &params)
+			if strings.TrimSpace(params.Name) == "" {
+				write(map[string]any{"id": message.ID, "type": "response", "command": message.Type, "success": false, "error": "Session name cannot be empty"})
+				break
+			}
+			sessionName = strings.TrimSpace(params.Name)
+			respond(message, map[string]any{})
 		case "compact":
 			data := map[string]any{"summary": "fixture summary", "firstKeptEntryId": "entry-1", "tokensBefore": 150000, "estimatedTokensAfter": 32000}
 			if mode == "pi-compact-without-estimate" {

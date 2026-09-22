@@ -283,6 +283,28 @@ func (s *Supervisor) DeliverEvent(ctx context.Context, name, conversation, event
 	return deliverer.DeliverEvent(ctx, conversation, eventID, event)
 }
 
+// RenameConversation forwards one best-effort conversation label to the
+// active generation of the named channel. A missing generation or a channel
+// without the capability reports an explicit sentinel so callers can treat
+// inapplicable channels as a silent no-op.
+func (s *Supervisor) RenameConversation(ctx context.Context, name, conversation, label string, onlyIfImplicit bool) error {
+	s.mu.Lock()
+	running := s.running[name]
+	var instance Channel
+	if running != nil {
+		instance = running.instance
+	}
+	s.mu.Unlock()
+	if instance == nil {
+		return fmt.Errorf("%s is disconnected: %w", name, ErrConversationLabelUnsupported)
+	}
+	labeler, ok := instance.(ConversationLabeler)
+	if !ok {
+		return fmt.Errorf("%s does not support conversation labels: %w", name, ErrConversationLabelUnsupported)
+	}
+	return labeler.RenameConversation(ctx, conversation, label, onlyIfImplicit)
+}
+
 func (s *Supervisor) runOne(ctx context.Context, name string, running *runningChannel, instance Channel) {
 	err := instance.Run(ctx, s.handler)
 	if authorizer, ok := instance.(RuntimeAuthorizer); ok && err != nil && ctx.Err() == nil {

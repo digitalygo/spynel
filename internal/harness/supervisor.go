@@ -887,6 +887,21 @@ func (s *Supervisor) ImportSession(ctx context.Context, key, sessionID string) (
 	return importer.ImportSession(ctx, key, sessionID)
 }
 
+// SetSessionName forwards one metadata-only session naming request to the
+// active harness with the same unsupported boundary as the other session
+// controls. A closed or unavailable target fails before any capability call.
+func (s *Supervisor) SetSessionName(ctx context.Context, key, expectedSessionID, name string, onlyIfEmpty bool) (SessionNameResult, error) {
+	target, err := s.target()
+	if err != nil {
+		return SessionNameResult{}, err
+	}
+	namer, ok := target.(SessionNamer)
+	if !ok {
+		return SessionNameResult{}, ErrSessionControlsUnsupported
+	}
+	return namer.SetSessionName(ctx, key, expectedSessionID, name, onlyIfEmpty)
+}
+
 // ProvidesConversationContext forwards the optional provider-neutral
 // conversation-context capability. It snapshots the target under the mutex
 // and queries the adapter outside it. A closed supervisor, an unavailable

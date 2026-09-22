@@ -1108,8 +1108,13 @@ type sessionControlSupervisorHarness struct {
 	found      bool
 	compact    CompactResult
 	imported   SessionInfo
+	nameResult SessionNameResult
+	nameErr    error
 	lastKey    string
 	lastDetail string
+
+	lastNameExpected    string
+	lastNameOnlyIfEmpty bool
 }
 
 func (r *sessionControlSupervisorHarness) SessionInfo(key string) (SessionInfo, bool, error) {
@@ -1133,6 +1138,17 @@ func (r *sessionControlSupervisorHarness) ImportSession(_ context.Context, key, 
 	return r.imported, nil
 }
 
+func (r *sessionControlSupervisorHarness) SetSessionName(_ context.Context, key, expectedSessionID, name string, onlyIfEmpty bool) (SessionNameResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastKey, r.lastDetail = key, name
+	r.lastNameExpected, r.lastNameOnlyIfEmpty = expectedSessionID, onlyIfEmpty
+	if r.nameErr != nil {
+		return SessionNameResult{}, r.nameErr
+	}
+	return r.nameResult, nil
+}
+
 func TestSupervisorForwardsPiSessionControls(t *testing.T) {
 	target := &sessionControlSupervisorHarness{
 		supervisorHarness: &supervisorHarness{name: "pi", active: map[string]bool{}, emits: map[string]core.Emit{}},
@@ -1140,6 +1156,7 @@ func TestSupervisorForwardsPiSessionControls(t *testing.T) {
 		found:             true,
 		compact:           CompactResult{TokensBefore: 100, TokensAfter: 20, TokensAfterKnown: true},
 		imported:          SessionInfo{ID: "session-2", Path: "/tmp/session-2.jsonl", Command: "pi"},
+		nameResult:        SessionNameResult{Name: "Focus", Changed: true},
 	}
 	registry := NewRegistry()
 	registry.Register("pi", func(HarnessConfig) (Harness, error) { return target, nil })
@@ -1178,6 +1195,17 @@ func TestSupervisorForwardsPiSessionControls(t *testing.T) {
 	if detail != "11111111-1111-1111-1111-111111111111" {
 		t.Fatalf("forwarded ImportSession id = %q", detail)
 	}
+	named, err := supervisor.SetSessionName(context.Background(), "chat", "session-1", "Focus", true)
+	if err != nil || named.Name != "Focus" || !named.Changed {
+		t.Fatalf("forwarded SetSessionName = %#v, %v", named, err)
+	}
+	target.mu.Lock()
+	key, detail = target.lastKey, target.lastDetail
+	expected, onlyIfEmpty := target.lastNameExpected, target.lastNameOnlyIfEmpty
+	target.mu.Unlock()
+	if key != "chat" || detail != "Focus" || expected != "session-1" || !onlyIfEmpty {
+		t.Fatalf("forwarded SetSessionName = key %q, name %q, expected %q, onlyIfEmpty %t", key, detail, expected, onlyIfEmpty)
+	}
 }
 
 func TestSupervisorReportsUnsupportedPiSessionControls(t *testing.T) {
@@ -1202,11 +1230,31 @@ func TestSupervisorReportsUnsupportedPiSessionControls(t *testing.T) {
 	if _, err := supervisor.ImportSession(context.Background(), "chat", "11111111-1111-1111-1111-111111111111"); err == nil || !strings.Contains(err.Error(), "does not provide Pi session controls") {
 		t.Fatalf("unsupported ImportSession error = %v", err)
 	}
+	if _, err := supervisor.SetSessionName(context.Background(), "chat", "session-1", "Focus", true); err == nil || !strings.Contains(err.Error(), "does not provide Pi session controls") {
+		t.Fatalf("unsupported SetSessionName error = %v", err)
+	}
 	if err := supervisor.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := supervisor.SessionInfo("chat"); err == nil || !strings.Contains(err.Error(), "supervisor is closed") {
 		t.Fatalf("closed SessionInfo error = %v", err)
+	}
+	if _, err := supervisor.SetSessionName(context.Background(), "chat", "session-1", "Focus", true); err == nil || !strings.Contains(err.Error(), "not started") {
+		t.Fatalf("closed SetSessionName error = %v", err)
+	}
+}
+
+func TestSupervisorSetSessionNameFailsClosedWhenUnavailable(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register("pi", func(HarnessConfig) (Harness, error) {
+		return &supervisorHarness{name: "pi", startErr: errors.New("missing executable"), active: map[string]bool{}, emits: map[string]core.Emit{}}, nil
+	})
+	supervisor := NewSupervisor(registry, HarnessConfig{Name: "pi"})
+	if err := supervisor.Start(context.Background()); err == nil {
+		t.Fatal("unavailable harness unexpectedly started")
+	}
+	if _, err := supervisor.SetSessionName(context.Background(), "chat", "session-1", "Focus", true); err == nil || !strings.Contains(err.Error(), "harness unavailable") {
+		t.Fatalf("unavailable SetSessionName error = %v", err)
 	}
 }
 
