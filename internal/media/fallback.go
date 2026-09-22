@@ -5,9 +5,10 @@ import (
 	"errors"
 )
 
-// ErrSpeechAPIKeyMissing reports that the configured cloud API key
-// environment variable was missing or blank when transcription started. It is
-// the only substitutable transcription failure: every other provider outcome,
+// ErrSpeechAPIKeyMissing reports that no cloud API key was available when
+// transcription started: the stored workspace key was empty and the
+// configured environment variable was missing or blank. It is the only
+// substitutable transcription failure: every other provider outcome,
 // including invalid keys, rate limits, timeouts, network errors, and empty
 // transcripts, is real evidence that must surface unchanged.
 var ErrSpeechAPIKeyMissing = errors.New("speech API key is not configured")

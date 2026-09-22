@@ -73,6 +73,16 @@ func TestConversationSessionLabelDerivation(t *testing.T) {
 			}
 		})
 	}
+	for _, command := range []string{
+		"/config set speech.elevenlabs_api_key SUPER-SECRET-VALUE",
+		"/config SET Speech.ElevenLabs_Api_Key SUPER-SECRET-VALUE",
+		"/config@spynel_bot set speech.elevenlabs_api_key SUPER-SECRET-VALUE",
+		"/config set channels.telegram.token SUPER-SECRET-VALUE",
+	} {
+		if label := conversationSessionLabel(command); strings.Contains(label, "SUPER-SECRET-VALUE") {
+			t.Fatalf("conversationSessionLabel(%q) = %q leaked the secret", command, label)
+		}
+	}
 }
 
 func TestAutomaticSessionNamingNamesTheFirstMessage(t *testing.T) {

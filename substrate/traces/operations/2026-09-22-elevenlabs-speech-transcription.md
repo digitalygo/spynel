@@ -6,15 +6,21 @@ files_edited:
   - AGENTS.md
   - docs/AGENTS.md
   - docs/architecture.md
+  - docs/cli.md
   - docs/configuration.md
   - docs/configuration-live-matrix.md
   - docs/integrations.md
   - docs/troubleshooting.md
   - internal/AGENTS.md
+  - internal/agentdocs/content.go
+  - internal/app/configuration.go
+  - internal/app/service.go
+  - internal/app/service_test.go
   - internal/app/session_name.go
   - internal/app/session_name_test.go
   - internal/channel/telegram/telegram.go
   - internal/channel/telegram/telegram_test.go
+  - internal/channel/tui/tui_test.go
   - internal/channel/whatsapp/whatsapp.go
   - internal/channel/whatsapp/whatsapp_test.go
   - internal/cli/cli.go
@@ -24,6 +30,7 @@ files_edited:
   - internal/config/config_test.go
   - internal/config/settings.go
   - internal/config/settings_test.go
+  - internal/localapi/localapi_test.go
   - internal/media/AGENTS.md
   - internal/media/elevenlabs.go
   - internal/media/elevenlabs_test.go
@@ -37,13 +44,14 @@ files_edited:
   - internal/workspace/templates/config.yaml
   - internal/workspace/workspace_test.go
   - substrate/traces/operations/2026-09-22-elevenlabs-speech-transcription.md
-rationale: Record the ElevenLabs speech provider from its original opt-in introduction through its current default status with a sentinel-only missing-key fallback to local Parakeet, the provider-neutral transcription contract, and the shared transcript markers, together with the DOX and user-documentation passes that keep the contracts aligned with the implemented behavior.
+rationale: Record the ElevenLabs speech provider from its original opt-in introduction through its current default status with a sentinel-only missing-key fallback to local Parakeet, the provider-neutral transcription contract, and the shared transcript markers, together with the DOX and user-documentation passes that keep the contracts aligned with the implemented behavior. The stored-key update adds the Telegram-style persisted key, stored-first resolution, and the generic `/config unset` clear operation with its accepted trust boundaries.
 supporting_docs:
   - ../../../docs/configuration.md
   - ../../../docs/configuration-live-matrix.md
   - ../../../docs/integrations.md
   - ../../../docs/troubleshooting.md
   - ../../../docs/architecture.md
+  - ../../../docs/cli.md
   - ../../../internal/media/AGENTS.md
   - ../../../AGENTS.md
   - ../../../docs/AGENTS.md
@@ -211,3 +219,46 @@ Checks for this record's update on the completed tree:
 - `scripts/dev.sh dox` reported DOX coverage valid for 51 tracked directories.
 - `git diff --check` reported no whitespace errors.
 - A structural Markdown scan of every added line confirmed one H1 in this file, uninterrupted heading progression, no em dash, no trailing whitespace, and a single trailing newline.
+
+## Update 2026-09-22: stored ElevenLabs key with CLI configuration
+
+### Summary
+
+The ElevenLabs speech API key can now be stored in the private workspace configuration as `speech.elevenlabs_api_key`, mirroring the Telegram bot token pattern, and set or cleared directly from the CLI with `spynel config set|unset speech.elevenlabs_api_key ...` or the shared `/config` commands. The stored key is a masked secret: lists, get output, forms, and screens report only `set` or `not set`, command history and session labels redact the value, and status, doctor, runtime logs, templates, and canonical empty saves never contain it. Resolution is stored-first: the trimmed stored key wins over the named environment variable, a blank stored value falls through to the environment, and only two empty sources trigger the existing local Parakeet fallback. A new generic `/config unset <key>` and `spynel config unset <key>` operation clears any clearable setting through the same validated save boundary. This update also reconciles the documentation and DOX prose that still described the key as environment-only and never stored.
+
+### Technical reasoning
+
+The product request was explicit: make the ElevenLabs key behave like the Telegram token, so an operator can persist it once in private workspace state instead of depending on a shell export that a detached autostart service does not inherit. `Config.ElevenLabsAPIKey()` therefore resolves the trimmed stored value first and the trimmed environment value second; a blank stored value falls through, preserving existing environment-only workspaces, and the missing-key sentinel still fires only when both are empty. Stored-first is deliberate: an explicit workspace change is the operator's most recent intent and must win over an inherited variable, and a nonblank but invalid stored key is authoritative provider evidence, so it surfaces the provider error instead of hiding behind a local transcript.
+
+Clearing needed a non-empty counterpart because `SetSetting` assigns a trimmed value and the ordinary `/config set` path cannot express an empty value for validated settings. `/config unset <key>` routes to the same `SetSetting` call with an empty value: clearable settings reset, and settings that cannot be empty reject with their ordinary validation error (for example, clearing `channels.telegram.token` while Telegram is enabled). This keeps one validated save boundary and one rollback behavior rather than a second persistence path.
+
+The trust boundaries are accepted and documented rather than hidden. Redaction protects Spynel's own durable history, session labels, replies, status, doctor, and runtime logs; it cannot protect a CLI positional value that already entered shell history and the process argument list, a value typed into Telegram or WhatsApp that transits those provider servers, a raw command delivered to a trusted `message.received` extension, or the authenticated loopback request body that carries the value to the elected owner. Configuration storage is plaintext in the private `0600` workspace file, not encrypted. The documentation recommends entering stored secrets from local surfaces (TUI or CLI) with that tradeoff stated plainly.
+
+### Impact
+
+- Rotation and recovery: rotate by setting a new value; clear with `/config unset speech.elevenlabs_api_key` to return to the environment variable and the existing missing-key fallback.
+- Clearing from the TUI is command-only: the form renders a configured secret as a masked `(configured)` control, an untouched secret is never resubmitted, and there is no clear control, so `/config unset` remains the supported clear action.
+- Autostart services no longer need shell-only exports when the key is stored in the workspace; the environment reference remains available for operators who prefer it.
+- All previously verified ElevenLabs boundaries and fallback semantics are unchanged: fixed endpoint, redirect refusal, pre-upload limits, streamed multipart, bounded sanitized errors, the single narrow rate-limit retry, and sentinel-only fallback.
+- DOX and user documentation now match the implemented behavior across root `AGENTS.md`, `internal/AGENTS.md`, `internal/config/AGENTS.md`, `internal/media/AGENTS.md`, `docs/configuration.md`, `docs/configuration-live-matrix.md`, `docs/integrations.md`, `docs/troubleshooting.md`, `docs/cli.md`, and `docs/architecture.md`; the compiled `internal/agentdocs` secret topic already described stored secrets and `/config unset` and was verified rather than edited.
+
+### Validation
+
+Implementation, quality, and security evidence for this delta:
+
+- `scripts/dev.sh test` passed, covering the full Go suite plus the nested Bubble Tea module tests.
+- Race runs passed with an explicit timeout for `./internal/config ./internal/media ./internal/app`.
+- `go vet ./...` was clean.
+- `mkdir -p .tmp-bin && go build -o .tmp-bin/spynel ./cmd/spynel` succeeded.
+- `scripts/smoke.sh` passed.
+- `scripts/dev.sh dox` reported DOX coverage valid for 51 tracked directories.
+- Coverage over the changed functions: `Config.ElevenLabsAPIKey` 80%, `SetSetting` 100%, `SetSettings` 95.2%, `IsSecretSetting` 100%, `secretState` 100%, `redactSensitiveCommand` 100%.
+- Quality gate verdict: PASS with two non-blocking advisories, including the wording of the unset rejection when Telegram is enabled.
+- Security gate verdict: PASS with two non-blocking advisories, including stale comments fixed in parallel and the local-surface entry recommendation now documented.
+
+Documentation pass checks run for this update on the completed tree:
+
+- `scripts/dev.sh dox` passed.
+- `go test -count=1 ./internal/config ./internal/media ./internal/app ./internal/agentdocs` passed.
+- `git diff --check` reported no whitespace errors.
+- A structural Markdown scan of every added line across the changed files confirmed one H1 per file, uninterrupted heading progression, no em dash, no trailing whitespace, and a single trailing newline.

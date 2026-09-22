@@ -540,6 +540,78 @@ func TestSpeechProviderAndElevenLabsValidation(t *testing.T) {
 	}
 }
 
+func TestElevenLabsAPIKeyResolutionPrecedenceAndNormalization(t *testing.T) {
+	const stored = "stored-secret-key"
+	const inherited = "inherited-env-key"
+	cfg := Default()
+	t.Setenv(cfg.Speech.ElevenLabsAPIKeyEnv, inherited)
+
+	if got := cfg.ElevenLabsAPIKey(); got != inherited {
+		t.Fatalf("environment fallback = %q, want %q", got, inherited)
+	}
+	cfg.Speech.ElevenLabsAPIKey = "  " + stored + "\t"
+	if got := cfg.ElevenLabsAPIKey(); got != stored {
+		t.Fatalf("stored key must win over the environment: %q", got)
+	}
+	cfg.Speech.ElevenLabsAPIKey = "   "
+	if got := cfg.ElevenLabsAPIKey(); got != inherited {
+		t.Fatalf("blank stored key must fall through to the environment: %q", got)
+	}
+	cfg.Speech.ElevenLabsAPIKey = ""
+	cfg.Speech.ElevenLabsAPIKeyEnv = "ELEVENLABS_TEST_KEY_DEFINITELY_ABSENT"
+	if got := cfg.ElevenLabsAPIKey(); got != "" {
+		t.Fatalf("missing environment key = %q, want empty", got)
+	}
+
+	// A decoded stored value is trimmed like the Telegram token, and the
+	// environment value is trimmed at resolution time.
+	root := t.TempDir()
+	path := writeTestConfig(t, root, []byte("version: 1\nspeech:\n  elevenlabs_api_key: '  "+stored+"  '\n"))
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Speech.ElevenLabsAPIKey != stored {
+		t.Fatalf("decoded stored key = %q, want %q", loaded.Speech.ElevenLabsAPIKey, stored)
+	}
+	t.Setenv("ELEVENLABS_TEST_KEY_WITH_SPACES", "  env-trimmed  ")
+	loaded.Speech.ElevenLabsAPIKey = ""
+	loaded.Speech.ElevenLabsAPIKeyEnv = "ELEVENLABS_TEST_KEY_WITH_SPACES"
+	if got := loaded.ElevenLabsAPIKey(); got != "env-trimmed" {
+		t.Fatalf("trimmed environment key = %q", got)
+	}
+}
+
+func TestElevenLabsAPIKeyCanonicalSaveOmitsEmptyStoredKey(t *testing.T) {
+	root := t.TempDir()
+	path := writeTestConfig(t, root, []byte("version: 1\n"))
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "elevenlabs_api_key:") {
+		t.Fatalf("fresh canonical save contains a stored API key:\n%s", data)
+	}
+	cfg.Speech.ElevenLabsAPIKey = "stored-secret-key"
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "elevenlabs_api_key: stored-secret-key") {
+		t.Fatalf("stored API key was not persisted:\n%s", data)
+	}
+}
+
 func TestValidEnvironmentVariableName(t *testing.T) {
 	for value, want := range map[string]bool{
 		"ELEVENLABS_API_KEY":     true,

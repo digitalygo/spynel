@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -308,6 +310,87 @@ func TestElevenLabsMissingOrBlankEnvironmentKeyFailsWithoutRequest(t *testing.T)
 
 	if requests.Load() != 0 {
 		t.Fatalf("network requests = %d, want 0", requests.Load())
+	}
+}
+
+func TestElevenLabsStoredKeyOverridesEnvironmentAndAppliesWithoutReconstruction(t *testing.T) {
+	const envKey = "environment-workspace-key"
+	const storedKey = "stored-workspace-key"
+	t.Setenv(config.DefaultElevenLabsAPIKeyEnv, envKey)
+
+	var mu sync.Mutex
+	var keys []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		keys = append(keys, request.Header.Get("xi-api-key"))
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"text":"cloud words"}`))
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.Path = filepath.Join(t.TempDir(), ".spynel", "config.yaml")
+	store := config.NewStore(cfg)
+	worker := NewElevenLabs(store)
+	worker.endpoint = server.URL
+	request := TranscriptionRequest{Path: elevenLabsFile(t, "voice.ogg", []byte("audio bytes")), DurationSeconds: 5}
+
+	if text, err := worker.Transcribe(context.Background(), request); err != nil || text != "cloud words" {
+		t.Fatalf("environment-key transcription = %q, %v", text, err)
+	}
+	if _, err := store.Update(func(next *config.Config) error {
+		next.Speech.ElevenLabsAPIKey = storedKey
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if text, err := worker.Transcribe(context.Background(), request); err != nil || text != "cloud words" {
+		t.Fatalf("stored-key transcription = %q, %v", text, err)
+	}
+	if _, err := store.Update(func(next *config.Config) error {
+		next.Speech.ElevenLabsAPIKey = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if text, err := worker.Transcribe(context.Background(), request); err != nil || text != "cloud words" {
+		t.Fatalf("cleared stored-key transcription = %q, %v", text, err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{envKey, storedKey, envKey}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("xi-api-key headers = %#v, want %#v", keys, want)
+	}
+}
+
+func TestElevenLabsStoredFailureNeverExposesTheKey(t *testing.T) {
+	const storedKey = "sentinel-stored-workspace-key"
+	server, requests := rawServer(http.StatusUnauthorized, nil, `{"detail":{"code":"invalid_api_key","message":"bad key"}}`)
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.Speech.ElevenLabsAPIKey = storedKey
+	cfg.Speech.ElevenLabsAPIKeyEnv = "ELEVENLABS_TEST_KEY_DEFINITELY_ABSENT"
+	worker := NewElevenLabs(config.NewStore(cfg))
+	worker.endpoint = server.URL
+	_, err := worker.Transcribe(context.Background(), TranscriptionRequest{
+		Path:            elevenLabsFile(t, "voice.ogg", []byte("audio bytes")),
+		DurationSeconds: 5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("stored key provider failure = %v", err)
+	}
+	if strings.Contains(err.Error(), storedKey) {
+		t.Fatalf("provider failure leaks the stored key: %v", err)
+	}
+	if errors.Is(err, ErrSpeechAPIKeyMissing) {
+		t.Fatalf("a nonblank stored key must not report the missing-key sentinel: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("network requests = %d, want 1", requests.Load())
 	}
 }
 

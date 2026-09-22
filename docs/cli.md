@@ -107,6 +107,8 @@ spynel command [--config PATH] [--conversation NAME] [--json] NAME [ARGUMENTS...
 
 `command` routes a non-visual slash command through the shared application handler. It joins the live owner when present; an offline framework command does not start a coding harness merely to read or mutate deterministic Spynel state. Common commands also have direct aliases:
 
+`spynel config get <key>`, `spynel config set <key> <value>`, and `spynel config unset <key>` route the shared `/config` handler through that same boundary. Unset clears a clearable stored value through the validated save; clearing `speech.elevenlabs_api_key` restores environment resolution, while clearing an enabled Telegram token fails with the ordinary validation error. Secret values stay masked and are never echoed by get, set, or unset output.
+
 `spynel jobs` lists live executions. `spynel jobs recent` lists up to 20 newest workspace-local archives by job number, while `spynel job info <number>` and `spynel job output <number> [tail <bytes>]` inspect bounded metadata or the newest captured event bytes. Numbers advance from 1 through 9999 and wrap to 1; after reuse, inspection selects the newest generation. The same slash commands work through authenticated channels and the terminal API because all use the shared application handler.
 
 `/trigger` lists triggerable processes. `/trigger orchestrator` performs an immediate serialized route pass, while `/trigger heartbeat` starts the primary semantic audit only if one is not already active. `/cleanup [days]` runs safe retention with a seven-day default; it uses strict whole-day validation and reports removed conversations, removed job archives and bytes, archived terminal tasks, protected items, and failures. `/new` is TUI-only because it switches the active durable conversation identity and shows that new conversation's normal welcome screen; the prior conversation remains available through `/resume`.
@@ -144,6 +146,7 @@ spynel update
 spynel update check
 spynel killall
 spynel config set workspace.history_max_messages 40
+spynel config unset speech.elevenlabs_api_key
 spynel command help commands
 ```
 

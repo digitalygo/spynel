@@ -2849,6 +2849,115 @@ func TestConfigurationCommandsPersistAcrossChannelsAndProtectOwnChannel(t *testi
 	}
 }
 
+func TestStoredSpeechSecretIsSetMaskedClearedAndNeverLeaks(t *testing.T) {
+	root := t.TempDir()
+	if err := workspace.Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	path := config.PathForRoot(root)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := New(cfg, newServiceHarness())
+	run := func(channel, command string) core.Event {
+		t.Helper()
+		var response core.Event
+		if err := service.Handle(context.Background(), core.Message{Channel: channel, Conversation: "secret-settings", Text: command}, func(event core.Event) { response = event }); err != nil {
+			t.Fatalf("%s: %v", command, err)
+		}
+		return response
+	}
+	const envValue = "environment-resolution-key"
+	t.Setenv("SPYNEL_TEST_ELEVENLABS_KEY", envValue)
+	if response := run("tui", "/config set speech.elevenlabs_api_key_env SPYNEL_TEST_ELEVENLABS_KEY"); !strings.Contains(response.Text, "speech.elevenlabs_api_key_env") {
+		t.Fatalf("environment reference response = %#v", response)
+	}
+
+	const stored = "sentinel-stored-speech-key"
+	const multiword = "sentinel-multiword-part"
+	for _, command := range []string{
+		"/config set speech.elevenlabs_api_key " + stored,
+		"/config SET Speech.ElevenLabs_Api_Key " + stored + " " + multiword,
+		"/config@SpynelBot set speech.elevenlabs_api_key " + stored,
+	} {
+		response := run("telegram", command)
+		if strings.Contains(response.Text, stored) || strings.Contains(response.Text, multiword) {
+			t.Fatalf("secret reply exposed the value for %q: %#v", command, response)
+		}
+		if !strings.Contains(response.Text, "`set`") {
+			t.Fatalf("secret reply did not report the masked state for %q: %#v", command, response)
+		}
+	}
+	if response := run("telegram", "/config get speech.elevenlabs_api_key"); !strings.Contains(response.Text, "`set`") || strings.Contains(response.Text, stored) {
+		t.Fatalf("masked lookup response = %#v", response)
+	}
+	if response := run("telegram", "/config"); !strings.Contains(response.Text, "speech.elevenlabs_api_key") || strings.Contains(response.Text, stored) {
+		t.Fatalf("masked settings listing = %#v", response)
+	}
+	configScreen, err := service.Screen("config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSecretControl := false
+	for _, control := range configScreen.Controls {
+		if control.Key == "speech.elevenlabs_api_key" {
+			foundSecretControl = control.Secret && control.Kind == "password" && control.Value == "" && control.Configured && control.Advanced
+		}
+	}
+	if !foundSecretControl {
+		t.Fatalf("configured speech secret control = %#v", configScreen.Controls)
+	}
+	for _, conversation := range []struct{ channel, name string }{{"tui", "secret-settings"}, {"telegram", "secret-settings"}} {
+		entries, _, err := service.History.Entries(conversation.channel, conversation.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.Contains(entry.Content, stored) || strings.Contains(entry.Content, multiword) {
+				t.Fatalf("secret leaked into %s history: %#v", conversation.channel, entry)
+			}
+		}
+	}
+	for _, entry := range service.Runtime.Logs() {
+		if strings.Contains(entry.Text, stored) || strings.Contains(entry.Text, multiword) {
+			t.Fatalf("secret leaked into runtime logs: %#v", entry)
+		}
+	}
+
+	if response := run("telegram", "/config unset speech.elevenlabs_api_key"); !strings.Contains(response.Text, "`not set`") {
+		t.Fatalf("unset response = %#v", response)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Speech.ElevenLabsAPIKey != "" {
+		t.Fatalf("unset stored key = %q", reloaded.Speech.ElevenLabsAPIKey)
+	}
+	if got := reloaded.ElevenLabsAPIKey(); got != envValue {
+		t.Fatalf("unset must restore environment resolution: %q", got)
+	}
+
+	if response := run("tui", "/config set channels.telegram.token tg-sentinel-token"); strings.Contains(response.Text, "tg-sentinel-token") {
+		t.Fatalf("Telegram token reply exposed the value: %#v", response)
+	}
+	if response := run("tui", "/telegram unset token"); !strings.Contains(response.Text, "`not set`") {
+		t.Fatalf("scoped Telegram unset response = %#v", response)
+	}
+	reloaded, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Channels.Telegram.Token != "" {
+		t.Fatalf("unset Telegram token = %q", reloaded.Channels.Telegram.Token)
+	}
+
+	if err := service.Handle(context.Background(), core.Message{Channel: "tui", Conversation: "secret-settings", Text: "/config unset workspace.history_max_messages"}, nil); err == nil || !strings.Contains(err.Error(), "history_max_messages") {
+		t.Fatalf("unset of a non-clearable setting = %v", err)
+	}
+}
+
 func TestHarnessAndModelCommandsUseSharedSettings(t *testing.T) {
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {

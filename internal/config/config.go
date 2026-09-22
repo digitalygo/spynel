@@ -165,6 +165,7 @@ type WhatsApp struct {
 type Speech struct {
 	Enabled             bool   `yaml:"enabled"`
 	Provider            string `yaml:"provider"`
+	ElevenLabsAPIKey    string `yaml:"elevenlabs_api_key,omitempty"`
 	ElevenLabsAPIKeyEnv string `yaml:"elevenlabs_api_key_env"`
 	ElevenLabsModelID   string `yaml:"elevenlabs_model_id"`
 	ModelDir            string `yaml:"model_dir,omitempty"`
@@ -345,6 +346,7 @@ func decode(data []byte, abs string) (Config, error) {
 	cfg.Harness.HeartbeatAgentPrefix = strings.TrimSpace(cfg.Harness.HeartbeatAgentPrefix)
 	cfg.Harness.Reviews = normalizeTaskReviewMode(cfg.Harness.Reviews)
 	cfg.Speech.Provider = strings.ToLower(strings.TrimSpace(cfg.Speech.Provider))
+	cfg.Speech.ElevenLabsAPIKey = strings.TrimSpace(cfg.Speech.ElevenLabsAPIKey)
 	cfg.Speech.ElevenLabsAPIKeyEnv = strings.TrimSpace(cfg.Speech.ElevenLabsAPIKeyEnv)
 	cfg.Speech.ElevenLabsModelID = strings.ToLower(strings.TrimSpace(cfg.Speech.ElevenLabsModelID))
 	cfg.Speech.Language = strings.ToLower(strings.TrimSpace(cfg.Speech.Language))
@@ -708,6 +710,21 @@ func (c Config) TelegramToken() string {
 	}
 	if c.Channels.Telegram.TokenEnv != "" {
 		return os.Getenv(c.Channels.Telegram.TokenEnv)
+	}
+	return ""
+}
+
+// ElevenLabsAPIKey resolves the effective ElevenLabs speech API key: the
+// trimmed stored workspace key first, otherwise the trimmed value of the
+// configured environment variable, otherwise empty. Stored-first is
+// deliberate: an explicit workspace change wins over an inherited variable,
+// and a blank stored value falls through to the environment.
+func (c Config) ElevenLabsAPIKey() string {
+	if key := strings.TrimSpace(c.Speech.ElevenLabsAPIKey); key != "" {
+		return key
+	}
+	if c.Speech.ElevenLabsAPIKeyEnv != "" {
+		return strings.TrimSpace(os.Getenv(c.Speech.ElevenLabsAPIKeyEnv))
 	}
 	return ""
 }

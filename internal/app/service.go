@@ -1937,6 +1937,7 @@ var slashCommands = []core.SlashCommand{
 	{Value: "/config", Usage: "/config", Description: "Open or show Spynel configuration"},
 	{Value: "/config get ", Usage: "/config get <key>", Description: "Read one configuration value"},
 	{Value: "/config set ", Usage: "/config set <key> <value>", Description: "Persist one configuration value"},
+	{Value: "/config unset ", Usage: "/config unset <key>", Description: "Clear one stored configuration value"},
 	{Value: "/harness ", Usage: "/harness [name]", Description: "Show or select the coding harness"},
 	{Value: "/model ", Usage: "/model [name]", Description: "Show or select the harness model"},
 	{Value: "/effort ", Usage: "/effort [level|inherit]", Description: "Show, select, or reset reasoning effort"},

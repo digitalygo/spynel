@@ -1417,7 +1417,8 @@ Usage:
   spynel goal OBJECTIVE          Create a goal markdown file
   spynel extension ...           List, install, or remove Git extensions
   spynel whatsapp pair           Pair a WhatsApp account by QR code
-  spynel config [get|set ...]    Validate config or run the shared config command
+  spynel config [get|set|unset ...]
+                                Validate config or run the shared config command
   spynel doctor                  Check local configuration and prerequisites
   spynel version                 Print the binary version
 `

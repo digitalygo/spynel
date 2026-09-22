@@ -173,6 +173,19 @@ func (s *Service) configurationCommand(message core.Message, section, remainder 
 		}
 		value := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(remainder, parts[0])), parts[1]))
 		return s.setSetting(message, key, value, emit)
+	case "unset":
+		if len(parts) != 2 {
+			return s.localReply(message, configurationUsage(section), emit)
+		}
+		key := scopedSettingKey(section, parts[1])
+		setting, ok := config.SettingByKey(s.Settings.Snapshot(), key)
+		if !ok || (section != "config" && setting.Section != section) {
+			return s.localReply(message, fmt.Sprintf("Unknown %s setting %q.", section, parts[1]), emit)
+		}
+		// The empty value is applied through the same validated save boundary as
+		// any other change; clearable settings reset, and settings that cannot
+		// be empty reject with their ordinary validation error.
+		return s.setSetting(message, key, "", emit)
 	default:
 		return s.localReply(message, configurationUsage(section), emit)
 	}
@@ -1568,9 +1581,9 @@ func formatSettings(cfg config.Config, section string) string {
 
 func configurationUsage(section string) string {
 	if section == "telegram" || section == "whatsapp" {
-		return fmt.Sprintf("Use `/%s on|off`, `/%s get <key>`, or `/%s set <key> <value>`.", section, section, section)
+		return fmt.Sprintf("Use `/%s on|off`, `/%s get <key>`, `/%s set <key> <value>`, or `/%s unset <key>`.", section, section, section, section)
 	}
-	return "Use `/config get <key>` or `/config set <key> <value>`."
+	return "Use `/config get <key>`, `/config set <key> <value>`, or `/config unset <key>`."
 }
 
 func scopedSettingKey(section, key string) string {

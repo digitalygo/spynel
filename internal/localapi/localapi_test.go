@@ -508,3 +508,51 @@ func TestScreenActionReturnsRefreshedStateWithFailure(t *testing.T) {
 		t.Fatalf("error state crossed API incorrectly: %#v, %v", screen, err)
 	}
 }
+
+func TestStoredSpeechSecretStaysMaskedThroughLoopbackScreensAndResponses(t *testing.T) {
+	election, server, _, cancel, done := startTestServer(t, t.TempDir())
+	defer func() { cancel(); <-done; lease, _ := election.Current(); _ = election.Release(lease.Token) }()
+	client := NewClient(election)
+	ctx, cancelCtx := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCtx()
+	const sentinel = "localapi-sentinel-speech-key"
+
+	var setResponse core.Event
+	if err := client.Handle(ctx, core.Message{Channel: "tui", Conversation: "local", Text: "/config set speech.elevenlabs_api_key " + sentinel}, func(event core.Event) {
+		setResponse = event
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(setResponse.Text, "`set`") || strings.Contains(setResponse.Text, sentinel) {
+		t.Fatalf("loopback apply response = %#v", setResponse)
+	}
+
+	var screenEvent core.Event
+	if err := client.Handle(ctx, core.Message{Channel: "tui", Conversation: "local", Text: "/config"}, func(event core.Event) {
+		if event.Kind == core.EventScreen && event.Screen != nil {
+			screenEvent = event
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if screenEvent.Screen == nil {
+		t.Fatal("loopback config screen was not returned")
+	}
+	found := false
+	for _, control := range screenEvent.Screen.Controls {
+		if control.Key == "speech.elevenlabs_api_key" {
+			found = control.Secret && control.Kind == "password" && control.Value == "" && control.Configured
+		}
+		if strings.Contains(control.Value, sentinel) || strings.Contains(control.Description, sentinel) {
+			t.Fatalf("loopback screen exposed the stored key: %#v", control)
+		}
+	}
+	if !found {
+		t.Fatalf("loopback screen is missing the configured secret control: %#v", screenEvent.Screen.Controls)
+	}
+	for _, entry := range server.Service.Runtime.Logs() {
+		if strings.Contains(entry.Text, sentinel) {
+			t.Fatalf("loopback runtime log exposed the stored key: %#v", entry)
+		}
+	}
+}

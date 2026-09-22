@@ -84,6 +84,23 @@ func TestInitCreatesDocumentedWorkspace(t *testing.T) {
 	if !cfg.Speech.Enabled || cfg.Speech.Provider != config.SpeechProviderElevenLabs || cfg.Speech.Language != "en" || cfg.Speech.NumThreads != 2 {
 		t.Fatalf("initialized workspace must enable English cloud transcription by default: %#v", cfg.Speech)
 	}
+	if cfg.Speech.ElevenLabsAPIKey != "" {
+		t.Fatalf("initialized workspace stored a speech API key: %q", cfg.Speech.ElevenLabsAPIKey)
+	}
+	configData, err := os.ReadFile(config.PathForRoot(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configData), "elevenlabs_api_key:") {
+		t.Fatalf("initialized workspace config contains a stored speech API key:\n%s", configData)
+	}
+	configInfo, err := os.Stat(config.PathForRoot(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("initialized config mode = %v, want private 0600", configInfo.Mode().Perm())
+	}
 	if err := Init(root, false); err == nil {
 		t.Fatal("second init should require --force")
 	}

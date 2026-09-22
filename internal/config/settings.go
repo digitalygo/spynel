@@ -78,7 +78,8 @@ func Settings(cfg Config) []Setting {
 		{Key: "speech.enabled", Section: "config", Description: "Transcribe incoming voice and audio messages", Value: formatBool(cfg.Speech.Enabled), Choices: []string{"on", "off"}, Advanced: true},
 		{Key: "speech.provider", Section: "config", Description: "Speech transcription backend (default: elevenlabs); elevenlabs uses the cloud API and falls back to local parakeet when its API key is missing or blank, parakeet runs locally", Value: cfg.Speech.Provider, Choices: SpeechProviders(), Advanced: true},
 		{Key: "speech.language", Section: "config", Description: "Transcription language for every provider; auto lets the provider detect it (Parakeet: en uses the English model and the other codes the multilingual model)", Value: cfg.Speech.Language, Choices: SpeechLanguages(), Advanced: true},
-		{Key: "speech.elevenlabs_api_key_env", Section: "config", Description: "ElevenLabs only: environment variable name holding the API key; the key value is never stored or shown, and a missing or blank value falls back to local parakeet", Value: cfg.Speech.ElevenLabsAPIKeyEnv, Advanced: true},
+		{Key: "speech.elevenlabs_api_key", Section: "config", Description: "ElevenLabs only: optional API key stored in the private workspace configuration; a stored key overrides the environment variable, and when empty the environment variable is used at transcription time", Value: secretState(cfg.Speech.ElevenLabsAPIKey), Secret: true, Advanced: true},
+		{Key: "speech.elevenlabs_api_key_env", Section: "config", Description: "ElevenLabs only: environment variable name holding the API key; used when no stored key is set, and a missing or blank value falls back to local parakeet", Value: cfg.Speech.ElevenLabsAPIKeyEnv, Advanced: true},
 		{Key: "speech.elevenlabs_model_id", Section: "config", Description: "ElevenLabs only: speech-to-text model", Value: cfg.Speech.ElevenLabsModelID, Choices: ElevenLabsModelIDs(), Advanced: true},
 		{Key: "speech.model_dir", Section: "config", Description: "Parakeet only: optional explicit model directory; otherwise use the shared OS user cache", Value: cfg.Speech.ModelDir, Advanced: true},
 		{Key: "speech.num_threads", Section: "config", Description: "Parakeet only: CPU threads used for local transcription", Value: strconv.Itoa(cfg.Speech.NumThreads), Advanced: true},
@@ -294,6 +295,8 @@ func setSetting(cfg *Config, key, value string) (Setting, error) { //nolint:gocy
 		cfg.Speech.Provider = strings.ToLower(value)
 	case "speech.language":
 		cfg.Speech.Language = strings.ToLower(value)
+	case "speech.elevenlabs_api_key":
+		cfg.Speech.ElevenLabsAPIKey = value
 	case "speech.elevenlabs_api_key_env":
 		cfg.Speech.ElevenLabsAPIKeyEnv = value
 	case "speech.elevenlabs_model_id":
@@ -349,7 +352,7 @@ func normalizeTaskReviewMode(value string) string {
 
 func IsSecretSetting(key string) bool {
 	key = normalizeSettingKey(key)
-	return key == "channels.telegram.token" || key == "channels.telegram.webhook_secret"
+	return key == "channels.telegram.token" || key == "channels.telegram.webhook_secret" || key == "speech.elevenlabs_api_key"
 }
 
 func parseBool(value, key string) (bool, error) {

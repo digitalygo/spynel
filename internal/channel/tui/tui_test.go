@@ -3129,6 +3129,51 @@ func TestConfigurationScreenReplacesChatAndSupportsFormNavigation(t *testing.T) 
 	}
 }
 
+func TestConfiguredSpeechSecretRendersMaskedAndSubmitsOnlyReplacements(t *testing.T) {
+	m := testModel()
+	var saved map[string]string
+	submitted := 0
+	m.saveSettings = func(values map[string]string) error {
+		saved = values
+		submitted++
+		return nil
+	}
+	secretControl := core.ScreenControl{Key: "speech.elevenlabs_api_key", Label: "elevenlabs api key", Kind: "password", Secret: true, Configured: true, Value: "", Description: "Stored speech key"}
+	m.openScreen(core.Screen{ID: "config", Controls: []core.ScreenControl{secretControl}})
+	if control := m.screen.Controls[0]; !control.Secret || control.Value != "" || !control.Configured || control.Kind != "password" {
+		t.Fatalf("configured speech secret control = %#v", control)
+	}
+	if editor := m.formEditor(0, 40); !editor.Mask || editor.Placeholder != "(configured)" {
+		t.Fatalf("configured secret editor mask=%t placeholder=%q", editor.Mask, editor.Placeholder)
+	}
+
+	// An untouched configured secret is never resubmitted.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = next.(model)
+	if cmd != nil || submitted != 0 || m.status != "No configuration changes" {
+		t.Fatalf("untouched secret save: cmd=%#v submitted=%d status=%q", cmd, submitted, m.status)
+	}
+
+	// A replacement is submitted through the ordinary masked control and is
+	// never rendered back into the form.
+	m.openScreen(core.Screen{ID: "config", Controls: []core.ScreenControl{secretControl}})
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("replacement-secret")})
+	m = next.(model)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = next.(model)
+	if cmd == nil || !m.screenSaving {
+		t.Fatal("replacement save did not start")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	if m.screen != nil || saved["speech.elevenlabs_api_key"] != "replacement-secret" {
+		t.Fatalf("replacement save = screen %#v values %#v", m.screen, saved)
+	}
+	if view := ansi.Strip(m.View()); strings.Contains(view, "replacement-secret") {
+		t.Fatal("saved secret value was rendered back into the view")
+	}
+}
+
 func TestSettingsSaveExitsConfigTelegramAndWhatsApp(t *testing.T) {
 	for _, screenID := range []string{"config", "telegram", "whatsapp"} {
 		t.Run(screenID, func(t *testing.T) {

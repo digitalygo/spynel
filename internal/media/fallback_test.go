@@ -64,6 +64,58 @@ func TestFallbackUsesFallbackOnlyWhenAPIKeyIsMissing(t *testing.T) {
 	}
 }
 
+func TestFallbackDoesNotSubstituteNonBlankStoredKey(t *testing.T) {
+	path := elevenLabsFile(t, "voice.ogg", []byte("audio bytes"))
+	server, requests := rawServer(http.StatusUnauthorized, nil, `{"detail":{"code":"invalid_api_key","message":"bad key"}}`)
+	defer server.Close()
+
+	primary := elevenLabsFixture(t, func(speech *config.Speech) {
+		speech.ElevenLabsAPIKey = testElevenLabsKey
+		speech.ElevenLabsAPIKeyEnv = "ELEVENLABS_TEST_KEY_DEFINITELY_ABSENT"
+	})
+	primary.endpoint = server.URL
+	fallback := &recordingTranscriber{text: "local words"}
+
+	text, err := NewFallback(primary, fallback).Transcribe(context.Background(), TranscriptionRequest{Path: path, DurationSeconds: 5})
+	if fallback.calls.Load() != 0 {
+		t.Fatalf("fallback consulted %d times for a nonblank stored key", fallback.calls.Load())
+	}
+	if text != "" || err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("nonblank stored-key failure = %q, %v", text, err)
+	}
+	if errors.Is(err, ErrSpeechAPIKeyMissing) {
+		t.Fatalf("a nonblank stored key must not report the missing-key sentinel: %v", err)
+	}
+	assertNoSecretLeak(t, err)
+	if requests.Load() != 1 {
+		t.Fatalf("network requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestFallbackUsesParakeetWhenStoredAndEnvironmentKeysAreBlank(t *testing.T) {
+	path := elevenLabsFile(t, "voice.ogg", []byte("audio bytes"))
+	t.Setenv(config.DefaultElevenLabsAPIKeyEnv, "   ")
+	server, requests := rawServer(http.StatusOK, nil, `{"text":"unexpected"}`)
+	defer server.Close()
+
+	primary := elevenLabsFixture(t, func(speech *config.Speech) {
+		speech.ElevenLabsAPIKey = "   "
+	})
+	primary.endpoint = server.URL
+	fallback := &recordingTranscriber{text: "local words"}
+
+	text, err := NewFallback(primary, fallback).Transcribe(context.Background(), TranscriptionRequest{Path: path, DurationSeconds: 5})
+	if err != nil || text != "local words" {
+		t.Fatalf("blank stored and environment key fallback = %q, %v", text, err)
+	}
+	if fallback.calls.Load() != 1 {
+		t.Fatalf("fallback calls = %d, want 1", fallback.calls.Load())
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("network requests = %d, want 0", requests.Load())
+	}
+}
+
 func TestFallbackPassesThroughPrimarySuccessAndNonKeyFailures(t *testing.T) {
 	path := elevenLabsFile(t, "voice.ogg", []byte("audio bytes"))
 	t.Setenv(config.DefaultElevenLabsAPIKeyEnv, testElevenLabsKey)

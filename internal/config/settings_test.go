@@ -156,6 +156,50 @@ func TestSpeechProviderSettingsAreLiveValidatedAndNotSecret(t *testing.T) {
 	}
 }
 
+func TestStoredElevenLabsAPIKeyIsASecretAdvancedSetting(t *testing.T) {
+	cfg := Default()
+	setting, ok := SettingByKey(cfg, "speech.elevenlabs_api_key")
+	if !ok || !setting.Secret || !setting.Advanced || setting.Restart || setting.Section != "config" {
+		t.Fatalf("speech.elevenlabs_api_key = %#v, present %t", setting, ok)
+	}
+	if setting.Value != "not set" {
+		t.Fatalf("unset stored key value = %q, want not set", setting.Value)
+	}
+	if !IsSecretSetting("speech.elevenlabs_api_key") {
+		t.Fatal("the stored API key must be a secret setting")
+	}
+	if IsSecretSetting("speech.elevenlabs_api_key_env") {
+		t.Fatal("the API key environment variable name must not be a secret setting")
+	}
+
+	const sentinel = "sentinel-stored-key"
+	changed, err := SetSetting(&cfg, "speech.elevenlabs_api_key", "  "+sentinel+"  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Value != "set" || !changed.Secret {
+		t.Fatalf("stored key state = %#v", changed)
+	}
+	if cfg.Speech.ElevenLabsAPIKey != sentinel {
+		t.Fatalf("stored key field = %q", cfg.Speech.ElevenLabsAPIKey)
+	}
+	exposed := changed.Key + changed.Value + changed.Description + strings.Join(changed.Choices, ",")
+	if strings.Contains(exposed, sentinel) {
+		t.Fatalf("secret setting exposed the raw value: %#v", changed)
+	}
+	if masked, _ := SettingByKey(cfg, "speech.elevenlabs_api_key"); masked.Value != "set" {
+		t.Fatalf("catalog value = %q, want set", masked.Value)
+	}
+
+	cleared, err := SetSetting(&cfg, "speech.elevenlabs_api_key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Value != "not set" || cfg.Speech.ElevenLabsAPIKey != "" {
+		t.Fatalf("cleared stored key = %#v, field %q", cleared, cfg.Speech.ElevenLabsAPIKey)
+	}
+}
+
 func TestChannelSettingsPutEssentialsFirstAndRemovePromptOverrides(t *testing.T) {
 	cfg := Default()
 	wantEssential := map[string][]string{

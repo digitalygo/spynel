@@ -74,8 +74,9 @@ type ElevenLabs struct {
 }
 
 // NewElevenLabs constructs the cloud transcription backend. The API key is not
-// stored here: it is resolved from the configured environment variable at the
-// start of every transcription.
+// stored here: at the start of every transcription it is resolved from the
+// stored workspace key first, otherwise from the configured environment
+// variable.
 func NewElevenLabs(settings *config.Store) *ElevenLabs {
 	return &ElevenLabs{
 		settings: settings,
@@ -101,14 +102,18 @@ func (e *ElevenLabs) Transcribe(ctx context.Context, request TranscriptionReques
 		return "", ctx.Err()
 	}
 
-	cfg := e.settings.Snapshot().Speech
+	// One snapshot per call fixes the effective key and the provider settings
+	// for this transcription; a later store change applies to the next call
+	// without reconstructing the client.
+	current := e.settings.Snapshot()
+	cfg := current.Speech
 	if !cfg.Enabled {
 		return "", errors.New("speech transcription is disabled")
 	}
 	keyName := strings.TrimSpace(cfg.ElevenLabsAPIKeyEnv)
-	key := strings.TrimSpace(os.Getenv(keyName))
+	key := current.ElevenLabsAPIKey()
 	if key == "" {
-		return "", fmt.Errorf("ElevenLabs API key environment variable %s is not set: %w", sanitizeTranscriptionText(keyName, maxProviderCodeRunes), ErrSpeechAPIKeyMissing)
+		return "", fmt.Errorf("ElevenLabs API key is not set and environment variable %s is missing or blank: %w", sanitizeTranscriptionText(keyName, maxProviderCodeRunes), ErrSpeechAPIKeyMissing)
 	}
 	if request.DurationSeconds <= 0 {
 		return "", errors.New("ElevenLabs transcription requires the declared audio duration")

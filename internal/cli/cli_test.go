@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1838,5 +1839,109 @@ func TestSpeechCacheStartupFailureGatesOnlyLocalParakeet(t *testing.T) {
 
 	if err := speechCacheStartupFailure(cfg.Speech, nil); err != nil {
 		t.Fatalf("healthy cache reported failure: %v", err)
+	}
+}
+
+func captureCLIStdout(t *testing.T, run func() error) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stdout
+	os.Stdout = writer
+	runErr := run()
+	os.Stdout = previous
+	_ = writer.Close()
+	data, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return string(data)
+}
+
+func TestCLIConfigSetAndUnsetKeepStoredSpeechSecretOutOfOutput(t *testing.T) {
+	root := t.TempDir()
+	if err := workspace.Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	path := config.PathForRoot(root)
+	const sentinel = "cli-sentinel-speech-key"
+
+	var setOutput bytes.Buffer
+	if err := runFrameworkMessageMode(path, "framework", "/config set speech.elevenlabs_api_key "+sentinel, "test", messageRunOptions{Output: &setOutput}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(setOutput.String(), sentinel) || !strings.Contains(setOutput.String(), "`set`") {
+		t.Fatalf("CLI config set output = %q", setOutput.String())
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Speech.ElevenLabsAPIKey != sentinel {
+		t.Fatalf("stored speech key = %q", cfg.Speech.ElevenLabsAPIKey)
+	}
+
+	var statusOutput bytes.Buffer
+	if err := runStatusCLICommand([]string{"--config", path, "--conversation", "automation", "--json"}, "test", &statusOutput); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(statusOutput.String(), sentinel) {
+		t.Fatalf("CLI status exposed the stored speech key: %s", statusOutput.String())
+	}
+
+	// Doctor runs against the process working directory, so point it at the
+	// workspace and give the selected harness a resolvable executable.
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	cfg.Harness.Name = "codex"
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(original) })
+	if output := captureCLIStdout(t, doctor); strings.Contains(output, sentinel) {
+		t.Fatalf("doctor exposed the stored speech key: %s", output)
+	}
+
+	var unsetOutput bytes.Buffer
+	if err := runFrameworkMessageMode(path, "framework", "/config unset speech.elevenlabs_api_key", "test", messageRunOptions{Output: &unsetOutput}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unsetOutput.String(), "`not set`") || strings.Contains(unsetOutput.String(), sentinel) {
+		t.Fatalf("CLI config unset output = %q", unsetOutput.String())
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Speech.ElevenLabsAPIKey != "" {
+		t.Fatalf("CLI unset stored speech key = %q", cfg.Speech.ElevenLabsAPIKey)
+	}
+	t.Setenv("SPYNEL_TEST_CLI_ELEVENLABS_KEY", "cli-environment-resolution")
+	cfg.Speech.ElevenLabsAPIKeyEnv = "SPYNEL_TEST_CLI_ELEVENLABS_KEY"
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ElevenLabsAPIKey(); got != "cli-environment-resolution" {
+		t.Fatalf("unset did not restore environment resolution: %q", got)
 	}
 }
