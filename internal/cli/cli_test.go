@@ -26,6 +26,7 @@ import (
 	"github.com/digitalygo/spynel/internal/history"
 	"github.com/digitalygo/spynel/internal/instance"
 	"github.com/digitalygo/spynel/internal/localapi"
+	"github.com/digitalygo/spynel/internal/media"
 	"github.com/digitalygo/spynel/internal/updater"
 	"github.com/digitalygo/spynel/internal/workspace"
 )
@@ -1738,5 +1739,73 @@ func TestStandaloneUpdateRestartAndProactiveEligibility(t *testing.T) {
 	t.Setenv("SPYNEL_SKIP_UPDATE_CHECK", "1")
 	if standaloneChecksEligible(nil, true) {
 		t.Fatal("ignored check suppression")
+	}
+}
+
+type namedTranscriber struct{ name string }
+
+func (n namedTranscriber) Transcribe(context.Context, media.TranscriptionRequest) (string, error) {
+	return n.name, nil
+}
+
+func TestSpeechTranscriberSelectionFollowsLiveProviderSetting(t *testing.T) {
+	parakeet := namedTranscriber{name: "parakeet"}
+	elevenlabs := namedTranscriber{name: "elevenlabs"}
+	cfg := config.Default()
+
+	selected := speechTranscriber(cfg.Speech, parakeet, elevenlabs)
+	text, err := selected.Transcribe(context.Background(), media.TranscriptionRequest{})
+	if err != nil || text != "parakeet" {
+		t.Fatalf("default provider selection = %q, %v", text, err)
+	}
+
+	// A live settings change re-wires the backend on the next channel build.
+	cfg.Speech.Provider = config.SpeechProviderElevenLabs
+	selected = speechTranscriber(cfg.Speech, parakeet, elevenlabs)
+	text, err = selected.Transcribe(context.Background(), media.TranscriptionRequest{})
+	if err != nil || text != "elevenlabs" {
+		t.Fatalf("cloud provider selection = %q, %v", text, err)
+	}
+
+	cfg.Speech.Provider = config.SpeechProviderParakeet
+	selected = speechTranscriber(cfg.Speech, parakeet, elevenlabs)
+	text, err = selected.Transcribe(context.Background(), media.TranscriptionRequest{})
+	if err != nil || text != "parakeet" {
+		t.Fatalf("switched back provider selection = %q, %v", text, err)
+	}
+
+	cfg.Speech.Enabled = false
+	if speechTranscriber(cfg.Speech, parakeet, elevenlabs) != nil {
+		t.Fatal("disabled transcription selected a backend")
+	}
+}
+
+func TestSpeechCacheStartupFailureGatesOnlyLocalParakeet(t *testing.T) {
+	cacheErr := errors.New("cache unavailable")
+	cfg := config.Default()
+	if err := speechCacheStartupFailure(cfg.Speech, cacheErr); !errors.Is(err, cacheErr) {
+		t.Fatalf("local Parakeet without a model dir must abort: %v", err)
+	}
+
+	cloud := cfg
+	cloud.Speech.Provider = config.SpeechProviderElevenLabs
+	if err := speechCacheStartupFailure(cloud.Speech, cacheErr); err != nil {
+		t.Fatalf("ElevenLabs must never require the local model cache: %v", err)
+	}
+
+	disabled := cfg
+	disabled.Speech.Enabled = false
+	if err := speechCacheStartupFailure(disabled.Speech, cacheErr); err != nil {
+		t.Fatalf("disabled speech must not require the cache: %v", err)
+	}
+
+	explicit := cfg
+	explicit.Speech.ModelDir = filepath.Join(t.TempDir(), "model")
+	if err := speechCacheStartupFailure(explicit.Speech, cacheErr); err != nil {
+		t.Fatalf("explicit model directory must bypass the cache: %v", err)
+	}
+
+	if err := speechCacheStartupFailure(cfg.Speech, nil); err != nil {
+		t.Fatalf("healthy cache reported failure: %v", err)
 	}
 }

@@ -95,6 +95,67 @@ func TestSpeechSettingsExposeParakeetLanguagesWithoutModelSize(t *testing.T) {
 	}
 }
 
+func TestSpeechProviderSettingsAreLiveValidatedAndNotSecret(t *testing.T) {
+	cfg := Default()
+	provider, ok := SettingByKey(cfg, "speech.provider")
+	if !ok || provider.Restart {
+		t.Fatalf("speech.provider = %#v, present %t", provider, ok)
+	}
+	if strings.Join(provider.Choices, ",") != "parakeet,elevenlabs" {
+		t.Fatalf("speech provider choices = %#v", provider.Choices)
+	}
+	keyEnv, ok := SettingByKey(cfg, "speech.elevenlabs_api_key_env")
+	if !ok || keyEnv.Restart || keyEnv.Secret {
+		t.Fatalf("speech.elevenlabs_api_key_env = %#v, present %t", keyEnv, ok)
+	}
+	if IsSecretSetting("speech.elevenlabs_api_key_env") {
+		t.Fatal("the API key variable name must not be a secret setting")
+	}
+	model, ok := SettingByKey(cfg, "speech.elevenlabs_model_id")
+	if !ok || model.Restart {
+		t.Fatalf("speech.elevenlabs_model_id = %#v, present %t", model, ok)
+	}
+	if strings.Join(model.Choices, ",") != "scribe_v2,scribe_v1" {
+		t.Fatalf("ElevenLabs model choices = %#v", model.Choices)
+	}
+
+	if _, err := SetSetting(&cfg, "speech.provider", "  ELEVENLABS  "); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Speech.Provider != "elevenlabs" {
+		t.Fatalf("normalized provider = %q", cfg.Speech.Provider)
+	}
+	if _, err := SetSetting(&cfg, "speech.provider", "local"); err == nil {
+		t.Fatal("unknown speech provider was accepted")
+	}
+	if cfg.Speech.Provider != "elevenlabs" {
+		t.Fatalf("failed provider setting changed the configuration: %q", cfg.Speech.Provider)
+	}
+	if _, err := SetSetting(&cfg, "speech.elevenlabs_api_key_env", " MY_KEY_2 "); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Speech.ElevenLabsAPIKeyEnv != "MY_KEY_2" {
+		t.Fatalf("API key env = %q", cfg.Speech.ElevenLabsAPIKeyEnv)
+	}
+	for _, invalid := range []string{"", "1BAD", "A-B", strings.Repeat("a", 129)} {
+		if _, err := SetSetting(&cfg, "speech.elevenlabs_api_key_env", invalid); err == nil {
+			t.Fatalf("invalid environment variable name accepted: %q", invalid)
+		}
+	}
+	if cfg.Speech.ElevenLabsAPIKeyEnv != "MY_KEY_2" {
+		t.Fatalf("failed env setting changed the configuration: %q", cfg.Speech.ElevenLabsAPIKeyEnv)
+	}
+	if _, err := SetSetting(&cfg, "speech.elevenlabs_model_id", "Scribe_V1"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Speech.ElevenLabsModelID != "scribe_v1" {
+		t.Fatalf("normalized model = %q", cfg.Speech.ElevenLabsModelID)
+	}
+	if _, err := SetSetting(&cfg, "speech.elevenlabs_model_id", "whisper-1"); err == nil {
+		t.Fatal("unknown ElevenLabs model was accepted")
+	}
+}
+
 func TestChannelSettingsPutEssentialsFirstAndRemovePromptOverrides(t *testing.T) {
 	cfg := Default()
 	wantEssential := map[string][]string{

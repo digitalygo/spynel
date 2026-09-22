@@ -1150,10 +1150,11 @@ func buildService(cfg config.Config, version string) (*app.Service, error) {
 func startChannels(ctx context.Context, service *app.Service, report channel.StatusReporter) (<-chan error, error) {
 	initial := service.Settings.Snapshot()
 	cacheRoot, cacheErr := media.SpeechCacheDir()
-	if cacheErr != nil && initial.Speech.Enabled && strings.TrimSpace(initial.Speech.ModelDir) == "" {
-		return nil, cacheErr
+	if err := speechCacheStartupFailure(initial.Speech, cacheErr); err != nil {
+		return nil, err
 	}
-	speech := media.NewParakeet(service.Settings, cacheRoot, cacheErr, service.Runtime.Writer("media"))
+	parakeet := media.NewParakeet(service.Settings, cacheRoot, cacheErr, service.Runtime.Writer("media"))
+	elevenlabs := media.NewElevenLabs(service.Settings)
 	managed := []channel.Managed{
 		{
 			Name:    "telegram",
@@ -1170,11 +1171,7 @@ func startChannels(ctx context.Context, service *app.Service, report channel.Sta
 				bot := telegram.NewWithIdentityStore(cfg.Channels.Telegram, cfg.TelegramToken(), cfg.StatePath("runtime", "telegram-identities.json"))
 				bot.SetNoticeReporter(service.SetNotice)
 				store := &media.Store{Directory: cfg.StatePath("attachments", "telegram"), MaxBytes: int64(cfg.Workspace.AttachmentMaxMB) * 1024 * 1024}
-				var transcriber media.Transcriber
-				if cfg.Speech.Enabled {
-					transcriber = speech
-				}
-				bot.SetMedia(store, transcriber)
+				bot.SetMedia(store, speechTranscriber(cfg.Speech, parakeet, elevenlabs))
 				return bot, nil
 			},
 		},
@@ -1192,11 +1189,7 @@ func startChannels(ctx context.Context, service *app.Service, report channel.Sta
 				client := whatsapp.New(cfg.Channels.WhatsApp, cfg.Resolve(cfg.Channels.WhatsApp.Database))
 				client.SetPairingReporter(service.SetPairing)
 				store := &media.Store{Directory: cfg.StatePath("attachments", "whatsapp"), MaxBytes: int64(cfg.Workspace.AttachmentMaxMB) * 1024 * 1024}
-				var transcriber media.Transcriber
-				if cfg.Speech.Enabled {
-					transcriber = speech
-				}
-				client.SetMedia(store, transcriber)
+				client.SetMedia(store, speechTranscriber(cfg.Speech, parakeet, elevenlabs))
 				return client, nil
 			},
 		},
@@ -1222,6 +1215,32 @@ func startChannels(ctx context.Context, service *app.Service, report channel.Sta
 func configFingerprint(value any) string {
 	data, _ := json.Marshal(value)
 	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// speechTranscriber selects the current speech transcription backend inside
+// each channel build callback, so a live settings change re-wires the
+// transport through the existing cfg.Speech fingerprint. It returns nil when
+// transcription is disabled and never falls back from ElevenLabs to a local
+// model.
+func speechTranscriber(speech config.Speech, parakeet, elevenlabs media.Transcriber) media.Transcriber {
+	if !speech.Enabled {
+		return nil
+	}
+	if speech.Provider == config.SpeechProviderElevenLabs {
+		return elevenlabs
+	}
+	return parakeet
+}
+
+// speechCacheStartupFailure gates the local Parakeet model cache requirement.
+// The ElevenLabs backend never initializes, downloads, or falls back to a
+// local model, so a missing speech cache only aborts startup for the local
+// Parakeet backend without an explicit model directory.
+func speechCacheStartupFailure(speech config.Speech, cacheErr error) error {
+	if cacheErr != nil && speech.Provider == config.SpeechProviderParakeet && speech.Enabled && strings.TrimSpace(speech.ModelDir) == "" {
+		return cacheErr
+	}
+	return nil
 }
 
 func initialConnectionStatuses(cfg config.Config) []channel.ConnectionStatus {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,21 @@ const (
 	TaskNotificationsOff    = "off"
 	TaskNotificationsDecide = "decide"
 	TaskNotificationsAlways = "always"
+
+	// SpeechProviderParakeet is the default local transcription backend;
+	// SpeechProviderElevenLabs is the opt-in cloud backend. The catalog names
+	// concrete implementations, never a generic "local".
+	SpeechProviderParakeet   = "parakeet"
+	SpeechProviderElevenLabs = "elevenlabs"
+
+	// ElevenLabsModelScribeV2 and ElevenLabsModelScribeV1 are the exact
+	// ElevenLabs speech-to-text model identifiers Spynel accepts.
+	ElevenLabsModelScribeV2 = "scribe_v2"
+	ElevenLabsModelScribeV1 = "scribe_v1"
+
+	// DefaultElevenLabsAPIKeyEnv is the environment variable read for the
+	// ElevenLabs API key unless the user names another one.
+	DefaultElevenLabsAPIKeyEnv = "ELEVENLABS_API_KEY"
 )
 
 var ErrNotInitialized = errors.New("Spynel is not initialized")
@@ -142,14 +158,20 @@ type WhatsApp struct {
 	PollIntervalSec int      `yaml:"poll_interval_seconds"`
 }
 
+// Speech is the complete transcription configuration. Language and the
+// resource limits are provider-neutral; model_dir, num_threads, and
+// chunk_seconds configure the local Parakeet backend only.
 type Speech struct {
-	Enabled        bool   `yaml:"enabled"`
-	ModelDir       string `yaml:"model_dir,omitempty"`
-	Language       string `yaml:"language"`
-	NumThreads     int    `yaml:"num_threads"`
-	MaxFileMB      int    `yaml:"max_file_mb"`
-	MaxDurationSec int    `yaml:"max_duration_seconds"`
-	ChunkSeconds   int    `yaml:"chunk_seconds"`
+	Enabled             bool   `yaml:"enabled"`
+	Provider            string `yaml:"provider"`
+	ElevenLabsAPIKeyEnv string `yaml:"elevenlabs_api_key_env"`
+	ElevenLabsModelID   string `yaml:"elevenlabs_model_id"`
+	ModelDir            string `yaml:"model_dir,omitempty"`
+	Language            string `yaml:"language"`
+	NumThreads          int    `yaml:"num_threads"`
+	MaxFileMB           int    `yaml:"max_file_mb"`
+	MaxDurationSec      int    `yaml:"max_duration_seconds"`
+	ChunkSeconds        int    `yaml:"chunk_seconds"`
 }
 
 var speechLanguages = []string{
@@ -172,6 +194,35 @@ func IsSpeechLanguage(value string) bool {
 		}
 	}
 	return false
+}
+
+// SpeechProviders returns the supported transcription backend names.
+func SpeechProviders() []string {
+	return []string{SpeechProviderParakeet, SpeechProviderElevenLabs}
+}
+
+func IsSpeechProvider(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == SpeechProviderParakeet || value == SpeechProviderElevenLabs
+}
+
+// ElevenLabsModelIDs returns the supported ElevenLabs speech-to-text models.
+func ElevenLabsModelIDs() []string {
+	return []string{ElevenLabsModelScribeV2, ElevenLabsModelScribeV1}
+}
+
+func IsElevenLabsModelID(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == ElevenLabsModelScribeV2 || value == ElevenLabsModelScribeV1
+}
+
+var portableEnvIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// ValidEnvironmentVariableName reports whether value is a portable environment
+// variable name: 1 to 128 bytes matching [A-Za-z_][A-Za-z0-9_]*. It names a
+// variable and is never treated as a secret value.
+func ValidEnvironmentVariableName(value string) bool {
+	return len(value) <= 128 && portableEnvIdentifier.MatchString(value)
 }
 
 type Startup struct {
@@ -217,7 +268,7 @@ func Default() Config {
 			Telegram: Telegram{Name: "spynel", TokenEnv: "SPYNEL_TELEGRAM_TOKEN", Mode: "polling", WebhookListen: "127.0.0.1:8787", PollTimeoutSec: 30, GroupMode: "mention", WelcomeMessage: "Welcome, {name}!"},
 			WhatsApp: WhatsApp{Mode: "self-chat", Database: ".spynel/whatsapp.db", PollIntervalSec: 3},
 		},
-		Speech:  Speech{Enabled: true, Language: "en", NumThreads: 2, MaxFileMB: 100, MaxDurationSec: 1800, ChunkSeconds: 600},
+		Speech:  Speech{Enabled: true, Provider: SpeechProviderParakeet, ElevenLabsAPIKeyEnv: DefaultElevenLabsAPIKeyEnv, ElevenLabsModelID: ElevenLabsModelScribeV2, Language: "en", NumThreads: 2, MaxFileMB: 100, MaxDurationSec: 1800, ChunkSeconds: 600},
 		Startup: Startup{},
 		Orchestrator: Orchestrator{
 			Enabled: true, IntervalSec: 10, RetriggerUnrespondedMessages: true, SemanticHeartbeatMinutes: 15, TaskNotifications: TaskNotificationsDecide, MaxParallel: 4,
@@ -292,6 +343,9 @@ func decode(data []byte, abs string) (Config, error) {
 	cfg.Harness.ReviewerAgentPrefix = strings.TrimSpace(cfg.Harness.ReviewerAgentPrefix)
 	cfg.Harness.HeartbeatAgentPrefix = strings.TrimSpace(cfg.Harness.HeartbeatAgentPrefix)
 	cfg.Harness.Reviews = normalizeTaskReviewMode(cfg.Harness.Reviews)
+	cfg.Speech.Provider = strings.ToLower(strings.TrimSpace(cfg.Speech.Provider))
+	cfg.Speech.ElevenLabsAPIKeyEnv = strings.TrimSpace(cfg.Speech.ElevenLabsAPIKeyEnv)
+	cfg.Speech.ElevenLabsModelID = strings.ToLower(strings.TrimSpace(cfg.Speech.ElevenLabsModelID))
 	cfg.Speech.Language = strings.ToLower(strings.TrimSpace(cfg.Speech.Language))
 	cfg.Path = abs
 	cfg.Root = rootForConfigPath(abs)
@@ -468,6 +522,15 @@ func (c Config) Validate() error {
 	}
 	if c.Speech.MaxFileMB <= 0 || c.Speech.MaxDurationSec <= 0 || c.Speech.ChunkSeconds <= 0 || c.Speech.NumThreads <= 0 {
 		problems = append(problems, "speech resource limits must be positive")
+	}
+	if !IsSpeechProvider(c.Speech.Provider) {
+		problems = append(problems, "speech.provider must be parakeet or elevenlabs")
+	}
+	if !IsElevenLabsModelID(c.Speech.ElevenLabsModelID) {
+		problems = append(problems, "speech.elevenlabs_model_id must be scribe_v2 or scribe_v1")
+	}
+	if !ValidEnvironmentVariableName(c.Speech.ElevenLabsAPIKeyEnv) {
+		problems = append(problems, "speech.elevenlabs_api_key_env must be a portable environment variable name of at most 128 bytes")
 	}
 	if !IsSpeechLanguage(c.Speech.Language) {
 		problems = append(problems, "speech.language must be auto or a supported Parakeet language code")

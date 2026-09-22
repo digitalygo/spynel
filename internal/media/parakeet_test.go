@@ -200,7 +200,7 @@ func TestParakeetChunksAndSerializesTranscription(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			text, err := worker.Transcribe(context.Background(), audio)
+			text, err := worker.Transcribe(context.Background(), TranscriptionRequest{Path: audio})
 			if err != nil {
 				errorsChannel <- err
 				return
@@ -241,7 +241,7 @@ func TestParakeetUsesMiniaudioForWAV(t *testing.T) {
 	worker.newRecognizer = func(parakeetFiles, int) (speechRecognizer, error) {
 		return &fixedRecognizer{text: "decoded locally"}, nil
 	}
-	text, err := worker.Transcribe(context.Background(), audio)
+	text, err := worker.Transcribe(context.Background(), TranscriptionRequest{Path: audio})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestParakeetDecodesTelegramStyleOggOpus(t *testing.T) {
 	worker.newRecognizer = func(parakeetFiles, int) (speechRecognizer, error) {
 		return recognizer, nil
 	}
-	text, err := worker.Transcribe(context.Background(), audio)
+	text, err := worker.Transcribe(context.Background(), TranscriptionRequest{Path: audio})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestParakeetRejectsUnsupportedAudioBeforeModelDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker := NewParakeet(config.NewStore(config.Default()), filepath.Join(root, "models"), nil, nil)
-	_, err := worker.Transcribe(context.Background(), audio)
+	_, err := worker.Transcribe(context.Background(), TranscriptionRequest{Path: audio})
 	if err == nil || !strings.Contains(err.Error(), "supported formats: WAV, FLAC, MP3, Ogg/Opus") {
 		t.Fatalf("unsupported format error = %v", err)
 	}
@@ -464,7 +464,7 @@ func TestParakeetRealIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker := NewParakeet(config.NewStore(cfg), cacheRoot, nil, os.Stderr)
-	text, err := worker.Transcribe(context.Background(), audio)
+	text, err := worker.Transcribe(context.Background(), TranscriptionRequest{Path: audio})
 	if err != nil {
 		t.Fatal(err)
 	}

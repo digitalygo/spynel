@@ -17,7 +17,6 @@ import (
 
 const (
 	parakeetSampleRate   = 16000
-	maxTranscriptBytes   = 1024 * 1024
 	parakeetEnglishModel = "english"
 	parakeetMultiModel   = "multilingual"
 )
@@ -62,7 +61,11 @@ func NewParakeet(settings *config.Store, modelDir string, cacheInitErr error, lo
 	}
 }
 
-func (p *Parakeet) Transcribe(ctx context.Context, audioPath string) (string, error) {
+// Transcribe decodes and transcribes one stored attachment locally. The
+// request's declared duration is deliberately ignored: Parakeet keeps its
+// decoder-based duration bound and behavior unchanged.
+func (p *Parakeet) Transcribe(ctx context.Context, request TranscriptionRequest) (string, error) {
+	audioPath := request.Path
 	select {
 	case p.serial <- struct{}{}:
 		defer func() { <-p.serial }()

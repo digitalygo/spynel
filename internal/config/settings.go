@@ -75,13 +75,16 @@ func Settings(cfg Config) []Setting {
 		{Key: "channels.whatsapp.database", Section: "whatsapp", Description: "Persistent WhatsApp session database", Value: cfg.Channels.WhatsApp.Database, Advanced: true},
 		{Key: "channels.whatsapp.allow_groups", Section: "whatsapp", Description: "Respond in groups when supported", Value: formatBool(cfg.Channels.WhatsApp.AllowGroups), Choices: []string{"on", "off"}, Advanced: true},
 		{Key: "channels.whatsapp.poll_interval_seconds", Section: "whatsapp", Description: "Connection health-check interval", Value: strconv.Itoa(cfg.Channels.WhatsApp.PollIntervalSec), Advanced: true},
-		{Key: "speech.enabled", Section: "config", Description: "Transcribe incoming voice messages", Value: formatBool(cfg.Speech.Enabled), Choices: []string{"on", "off"}, Advanced: true},
-		{Key: "speech.language", Section: "config", Description: "Parakeet transcription language; English uses the English model and other values use multilingual auto-detection", Value: cfg.Speech.Language, Choices: SpeechLanguages(), Advanced: true},
-		{Key: "speech.model_dir", Section: "config", Description: "Optional explicit Parakeet model directory; otherwise use the shared OS user cache", Value: cfg.Speech.ModelDir, Advanced: true},
-		{Key: "speech.num_threads", Section: "config", Description: "CPU threads used for local transcription", Value: strconv.Itoa(cfg.Speech.NumThreads), Advanced: true},
-		{Key: "speech.max_file_mb", Section: "config", Description: "Maximum accepted voice file size", Value: strconv.Itoa(cfg.Speech.MaxFileMB), Advanced: true},
-		{Key: "speech.max_duration_seconds", Section: "config", Description: "Maximum voice duration processed", Value: strconv.Itoa(cfg.Speech.MaxDurationSec), Advanced: true},
-		{Key: "speech.chunk_seconds", Section: "config", Description: "Maximum transcription chunk duration", Value: strconv.Itoa(cfg.Speech.ChunkSeconds), Advanced: true},
+		{Key: "speech.enabled", Section: "config", Description: "Transcribe incoming voice and audio messages", Value: formatBool(cfg.Speech.Enabled), Choices: []string{"on", "off"}, Advanced: true},
+		{Key: "speech.provider", Section: "config", Description: "Speech transcription backend; parakeet runs locally and elevenlabs uses the cloud API", Value: cfg.Speech.Provider, Choices: SpeechProviders(), Advanced: true},
+		{Key: "speech.language", Section: "config", Description: "Transcription language for every provider; auto lets the provider detect it (Parakeet: en uses the English model and the other codes the multilingual model)", Value: cfg.Speech.Language, Choices: SpeechLanguages(), Advanced: true},
+		{Key: "speech.elevenlabs_api_key_env", Section: "config", Description: "ElevenLabs only: environment variable name holding the API key; the key value is never stored or shown", Value: cfg.Speech.ElevenLabsAPIKeyEnv, Advanced: true},
+		{Key: "speech.elevenlabs_model_id", Section: "config", Description: "ElevenLabs only: speech-to-text model", Value: cfg.Speech.ElevenLabsModelID, Choices: ElevenLabsModelIDs(), Advanced: true},
+		{Key: "speech.model_dir", Section: "config", Description: "Parakeet only: optional explicit model directory; otherwise use the shared OS user cache", Value: cfg.Speech.ModelDir, Advanced: true},
+		{Key: "speech.num_threads", Section: "config", Description: "Parakeet only: CPU threads used for local transcription", Value: strconv.Itoa(cfg.Speech.NumThreads), Advanced: true},
+		{Key: "speech.max_file_mb", Section: "config", Description: "Maximum accepted voice and audio file size for every provider", Value: strconv.Itoa(cfg.Speech.MaxFileMB), Advanced: true},
+		{Key: "speech.max_duration_seconds", Section: "config", Description: "Maximum audio duration processed for every provider", Value: strconv.Itoa(cfg.Speech.MaxDurationSec), Advanced: true},
+		{Key: "speech.chunk_seconds", Section: "config", Description: "Parakeet only: maximum transcription chunk duration", Value: strconv.Itoa(cfg.Speech.ChunkSeconds), Advanced: true},
 	}
 	return values
 }
@@ -287,8 +290,14 @@ func setSetting(cfg *Config, key, value string) (Setting, error) { //nolint:gocy
 		cfg.Channels.WhatsApp.PollIntervalSec, err = parseInteger(2)
 	case "speech.enabled":
 		cfg.Speech.Enabled, err = parseBoolean()
+	case "speech.provider":
+		cfg.Speech.Provider = strings.ToLower(value)
 	case "speech.language":
 		cfg.Speech.Language = strings.ToLower(value)
+	case "speech.elevenlabs_api_key_env":
+		cfg.Speech.ElevenLabsAPIKeyEnv = value
+	case "speech.elevenlabs_model_id":
+		cfg.Speech.ElevenLabsModelID = strings.ToLower(value)
 	case "speech.model_dir":
 		cfg.Speech.ModelDir = value
 	case "speech.num_threads":

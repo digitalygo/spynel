@@ -94,11 +94,15 @@ func conversationSessionLabel(text string) string {
 
 // sessionLabelGeneratedLine reports one transport-generated attachment or
 // diagnostic line that must never become a session label. Captions and
-// generated transcripts are user-visible prose and stay eligible.
+// generated transcripts are user-visible prose and stay eligible. The legacy
+// voice prefixes stay recognized so old history remains safe.
 func sessionLabelGeneratedLine(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	for _, prefix := range []string{
 		"[Attachment ",
+		"[Speech transcription is disabled",
+		"[Speech transcription failed",
+		"[Generated speech transcription",
 		"[Voice transcription is disabled",
 		"[Voice transcription failed",
 		"[Generated voice transcription",

@@ -691,16 +691,16 @@ func (b *Bot) messageText(ctx context.Context, message *telegramMessage) (string
 			return "", err
 		}
 		parts = append(parts, attachment.Token())
-		if file.Voice && b.speech == nil {
-			parts = append(parts, "[Voice transcription is disabled; inspect the attached audio manually]")
+		if file.Speech && b.speech == nil {
+			parts = append(parts, media.TranscriptionDisabledMarker())
 		}
-		if file.Voice && b.speech != nil {
-			transcript, err := b.speech.Transcribe(ctx, attachment.Path)
+		if file.Speech && b.speech != nil {
+			transcript, err := b.speech.Transcribe(ctx, media.TranscriptionRequest{Path: attachment.Path, DurationSeconds: file.DurationSeconds})
 			if err != nil {
-				parts = append(parts, "[Voice transcription failed — inspect the attached audio manually: "+err.Error()+"]")
+				parts = append(parts, media.TranscriptionFailedMarker(err))
 				continue
 			}
-			parts = append(parts, "[Generated voice transcription — may contain errors]\n"+strings.TrimSpace(transcript))
+			parts = append(parts, media.TranscriptionGeneratedMarker(transcript))
 		}
 	}
 	return joinNonempty(parts), nil
@@ -1113,6 +1113,7 @@ type telegramMedia struct {
 	FileID       string `json:"file_id"`
 	FileUniqueID string `json:"file_unique_id"`
 	FileName     string `json:"file_name"`
+	Duration     int    `json:"duration"`
 }
 
 type telegramPhoto struct {
@@ -1123,7 +1124,11 @@ type telegramPhoto struct {
 type telegramFile struct {
 	FileID string
 	Name   string
-	Voice  bool
+	// Speech marks Telegram voice notes and audio files for transcription.
+	// Video, video notes, documents (even audio-named ones), photos, and
+	// stickers are never transcribed.
+	Speech          bool
+	DurationSeconds int
 }
 
 func (m *telegramMessage) hasMedia() bool {
@@ -1147,10 +1152,10 @@ func (m *telegramMessage) files() []telegramFile {
 		files = append(files, telegramFile{FileID: m.Video.FileID, Name: firstNonempty(m.Video.FileName, "video-"+m.Video.FileUniqueID+".mp4")})
 	}
 	if m.Audio != nil {
-		files = append(files, telegramFile{FileID: m.Audio.FileID, Name: firstNonempty(m.Audio.FileName, "audio-"+m.Audio.FileUniqueID+".mp3")})
+		files = append(files, telegramFile{FileID: m.Audio.FileID, Name: firstNonempty(m.Audio.FileName, "audio-"+m.Audio.FileUniqueID+".mp3"), Speech: true, DurationSeconds: m.Audio.Duration})
 	}
 	if m.Voice != nil {
-		files = append(files, telegramFile{FileID: m.Voice.FileID, Name: "voice-" + m.Voice.FileUniqueID + ".ogg", Voice: true})
+		files = append(files, telegramFile{FileID: m.Voice.FileID, Name: "voice-" + m.Voice.FileUniqueID + ".ogg", Speech: true, DurationSeconds: m.Voice.Duration})
 	}
 	return files
 }

@@ -52,13 +52,16 @@ Every setting below is exposed by the shared typed catalog used by the TUI, slas
 | `channels.whatsapp.database` | Live | Channel supervisor consumes the refreshed snapshot and opens the selected workspace-relative session database | Invalid values reject before save; adapter failures remain isolated | WhatsApp configuration and supervisor tests |
 | `channels.whatsapp.allow_groups` | Live | Replacement and delivery authorization use the new group policy | Validation/persistence is all-or-nothing | WhatsApp group tests |
 | `channels.whatsapp.poll_interval_seconds` | Live | Replacement health loop uses the new interval | Range validation rejects before commit | WhatsApp polling tests |
-| `speech.enabled` | Live | Channel fingerprint replaces adapters; the next voice event uses the new policy | Stale adapters are revoked | speech/channel tests |
-| `speech.language` | Live | Replacement transcriber selection uses the new language | Catalog validation rejects before commit | speech language tests |
-| `speech.model_dir` | Live | Replacement uses the new explicit model root on the next transcription | Invalid runtime model use returns a visible event error | speech model tests |
-| `speech.num_threads` | Live | Replacement transcriber snapshot uses the new worker count | Range validation rejects before commit | speech configuration tests |
-| `speech.max_file_mb` | Live | Replacement rejects subsequent oversized voice files at the new bound | Range validation rejects before commit | speech size-limit tests |
-| `speech.max_duration_seconds` | Live | Replacement bounds the next transcription duration | Range validation rejects before commit | speech duration tests |
-| `speech.chunk_seconds` | Live | Replacement chunks the next transcription at the new duration | Range validation rejects before commit | speech chunk tests |
+| `speech.enabled` | Live | Channel fingerprint replaces adapters; the next voice or audio event uses the new policy | Stale adapters are revoked | speech/channel tests |
+| `speech.provider` | Live | Channel fingerprint re-wires the replacement adapter to the selected backend | Catalog validation rejects before commit | provider selection and channel rewire tests |
+| `speech.language` | Live | Replacement transcriber selection uses the new language for either provider | Catalog validation rejects before commit | speech language tests |
+| `speech.elevenlabs_api_key_env` | Live | The next ElevenLabs transcription resolves the new environment reference | Portable variable-name validation rejects before commit; the key value is never read during save | speech key-reference tests |
+| `speech.elevenlabs_model_id` | Live | The next ElevenLabs upload sends the new model ID | Catalog validation rejects before commit | speech model tests |
+| `speech.model_dir` | Live | Parakeet replacement uses the new explicit model root on the next transcription | Invalid runtime model use returns a visible event error | speech model tests |
+| `speech.num_threads` | Live | Parakeet replacement transcriber snapshot uses the new worker count | Range validation rejects before commit | speech configuration tests |
+| `speech.max_file_mb` | Live | Replacement rejects subsequent oversized voice and audio files at the new bound | Range validation rejects before commit | speech size-limit tests |
+| `speech.max_duration_seconds` | Live | Replacement bounds the next transcription duration or rejects the upload | Range validation rejects before commit | speech duration tests |
+| `speech.chunk_seconds` | Live | Parakeet replacement chunks the next transcription at the new duration | Range validation rejects before commit | speech chunk tests |
 
 `channels.tui.enabled` is intentionally absent. Legacy YAML containing it is normalized during load and a canonical save removes it. Bare `spynel` launches the TUI; `spynel serve` remains headless unless invoked with `--tui`.
 

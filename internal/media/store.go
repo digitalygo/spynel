@@ -45,10 +45,6 @@ func (s Store) CleanupOlderThan(age time.Duration) (int, error) {
 	return removed, nil
 }
 
-type Transcriber interface {
-	Transcribe(context.Context, string) (string, error)
-}
-
 func (a Attachment) Token() string {
 	label := strings.ReplaceAll(a.Name, "]", "_")
 	return "[Attachment " + label + "](<" + filepath.ToSlash(a.Path) + ">)"

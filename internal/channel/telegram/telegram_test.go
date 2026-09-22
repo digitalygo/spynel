@@ -26,7 +26,10 @@ import (
 	"github.com/digitalygo/spynel/internal/media"
 )
 
-type fixedTranscriber struct{ text string }
+type fixedTranscriber struct {
+	text     string
+	requests chan media.TranscriptionRequest
+}
 
 type telegramRoundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -34,14 +37,25 @@ func (f telegramRoundTripFunc) RoundTrip(request *http.Request) (*http.Response,
 	return f(request)
 }
 
-func (t fixedTranscriber) Transcribe(context.Context, string) (string, error) { return t.text, nil }
+func (t *fixedTranscriber) Transcribe(_ context.Context, request media.TranscriptionRequest) (string, error) {
+	if t.requests != nil {
+		t.requests <- request
+	}
+	return t.text, nil
+}
+
+type failingTranscriber struct{ err error }
+
+func (t failingTranscriber) Transcribe(context.Context, media.TranscriptionRequest) (string, error) {
+	return "", t.err
+}
 
 type blockingTelegramTranscriber struct {
 	entered chan struct{}
 	release <-chan struct{}
 }
 
-func (t blockingTelegramTranscriber) Transcribe(ctx context.Context, _ string) (string, error) {
+func (t blockingTelegramTranscriber) Transcribe(ctx context.Context, _ media.TranscriptionRequest) (string, error) {
 	close(t.entered)
 	select {
 	case <-t.release:
@@ -49,6 +63,13 @@ func (t blockingTelegramTranscriber) Transcribe(ctx context.Context, _ string) (
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+}
+
+type forbiddenTranscriber struct{ t *testing.T }
+
+func (f forbiddenTranscriber) Transcribe(context.Context, media.TranscriptionRequest) (string, error) {
+	f.t.Error("non-audio media reached the transcriber")
+	return "", errors.New("unexpected transcription")
 }
 
 func TestTelegramRealShapeReplyCarriesIDAndCaption(t *testing.T) {
@@ -481,17 +502,142 @@ func TestTelegramVoiceIsStoredAndTranscribed(t *testing.T) {
 	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
 	bot.baseURL = server.URL
 	store := &media.Store{Directory: filepath.Join(t.TempDir(), "attachments"), MaxBytes: 1024}
-	bot.SetMedia(store, fixedTranscriber{text: "hello from audio"})
-	text, err := bot.messageText(context.Background(), &telegramMessage{Voice: &telegramMedia{FileID: "voice-id", FileUniqueID: "unique"}})
+	requests := make(chan media.TranscriptionRequest, 1)
+	bot.SetMedia(store, &fixedTranscriber{text: "hello from audio", requests: requests})
+	text, err := bot.messageText(context.Background(), &telegramMessage{Voice: &telegramMedia{FileID: "voice-id", FileUniqueID: "unique", Duration: 12}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, "[Attachment voice-unique.ogg]") || !strings.Contains(text, "[Generated voice transcription") || !strings.Contains(text, "hello from audio") {
+	if !strings.Contains(text, "[Attachment voice-unique.ogg]") || !strings.Contains(text, media.TranscriptionGeneratedMarker("hello from audio")) {
 		t.Fatalf("message text = %q", text)
+	}
+	request := <-requests
+	if request.DurationSeconds != 12 || filepath.Base(request.Path) != "voice-unique.ogg" {
+		t.Fatalf("transcription request = %#v", request)
 	}
 	data, err := os.ReadFile(filepath.Join(store.Directory, "voice-unique.ogg"))
 	if err != nil || string(data) != "voice bytes" {
 		t.Fatalf("stored voice = %q, %v", string(data), err)
+	}
+}
+
+func TestTelegramAudioFilesAreTranscribedWithDeclaredDuration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/bottest/getFile":
+			_, _ = writer.Write([]byte(`{"ok":true,"result":{"file_path":"audio/song.mp3"}}`))
+		case "/file/bottest/audio/song.mp3":
+			_, _ = writer.Write([]byte("audio bytes"))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	requests := make(chan media.TranscriptionRequest, 1)
+	bot.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "attachments"), MaxBytes: 1024}, &fixedTranscriber{text: "song words", requests: requests})
+	text, err := bot.messageText(context.Background(), &telegramMessage{Audio: &telegramMedia{
+		FileID: "audio-id", FileUniqueID: "aunique", FileName: "song.mp3", Duration: 7,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "[Attachment song.mp3]") || !strings.Contains(text, media.TranscriptionGeneratedMarker("song words")) {
+		t.Fatalf("message text = %q", text)
+	}
+	request := <-requests
+	if request.DurationSeconds != 7 || filepath.Base(request.Path) != "song.mp3" {
+		t.Fatalf("transcription request = %#v", request)
+	}
+}
+
+func TestTelegramNonAudioMediaIsNeverTranscribed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/bottest/getFile":
+			_, _ = writer.Write([]byte(`{"ok":true,"result":{"file_path":"media/file.bin"}}`))
+		case "/file/bottest/media/file.bin":
+			_, _ = writer.Write([]byte("raw bytes"))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	bot.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "attachments"), MaxBytes: 4096}, forbiddenTranscriber{t: t})
+	// Documents stay untranscribed even with an audio-named file; photos and
+	// videos (and video notes, which are never parsed) are untouched too.
+	text, err := bot.messageText(context.Background(), &telegramMessage{
+		Document: &telegramDocument{FileID: "doc-id", FileUniqueID: "dunique", FileName: "podcast.mp3"},
+		Photo:    []telegramPhoto{{FileID: "photo-id", FileUniqueID: "punique"}},
+		Video:    &telegramMedia{FileID: "video-id", FileUniqueID: "vunique"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[Attachment podcast.mp3]", "[Attachment photo-punique.jpg]", "[Attachment video-vunique.mp4]"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("message text = %q, missing %q", text, want)
+		}
+	}
+	if strings.Contains(text, "transcription") || strings.Contains(text, "[Speech") {
+		t.Fatalf("non-audio media produced transcription prose: %q", text)
+	}
+}
+
+func TestTelegramTranscriptionMarkersAreExact(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/bottest/getFile":
+			_, _ = writer.Write([]byte(`{"ok":true,"result":{"file_path":"voice/file.ogg"}}`))
+		case "/file/bottest/voice/file.ogg":
+			_, _ = writer.Write([]byte("voice bytes"))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	voice := func() *telegramMessage {
+		return &telegramMessage{Voice: &telegramMedia{FileID: "voice-id", FileUniqueID: "unique", Duration: 3}}
+	}
+
+	withoutSpeech := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	withoutSpeech.baseURL = server.URL
+	withoutSpeech.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "disabled"), MaxBytes: 1024}, nil)
+	text, err := withoutSpeech.messageText(context.Background(), voice())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(text, "\n\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "[Attachment voice-unique.ogg]") || lines[1] != "[Speech transcription is disabled; inspect the attached audio manually]" {
+		t.Fatalf("disabled marker = %q", text)
+	}
+
+	failing := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	failing.baseURL = server.URL
+	failing.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "failing"), MaxBytes: 1024}, failingTranscriber{err: errors.New("boom")})
+	text, err = failing.messageText(context.Background(), voice())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(text, "[Speech transcription failed; inspect the attached audio manually: boom]") {
+		t.Fatalf("failure marker = %q", text)
+	}
+
+	succeeding := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	succeeding.baseURL = server.URL
+	succeeding.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "succeeding"), MaxBytes: 1024}, &fixedTranscriber{text: "  spoken words  "})
+	text, err = succeeding.messageText(context.Background(), voice())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(text, "[Generated speech transcription; may contain errors]\nspoken words") {
+		t.Fatalf("generated marker = %q", text)
 	}
 }
 

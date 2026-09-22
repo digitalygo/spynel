@@ -838,7 +838,7 @@ func (c *Client) prepareMessage(ctx context.Context, incoming incomingMessage) (
 		return "", err
 	}
 	parts := []string{messageBody(incoming.message)}
-	downloadable, name, voice, size := downloadableMedia(incoming.message, incoming.id)
+	downloadable, name, speech, duration, size := downloadableMedia(incoming.message, incoming.id)
 	if downloadable != nil {
 		if c.store == nil {
 			return "", errors.New("attachment storage is not configured")
@@ -859,16 +859,16 @@ func (c *Client) prepareMessage(ctx context.Context, incoming incomingMessage) (
 			return "", err
 		}
 		parts = append(parts, attachment.Token())
-		if voice && c.speech == nil {
-			parts = append(parts, "[Voice transcription is disabled; inspect the attached audio manually]")
+		if speech && c.speech == nil {
+			parts = append(parts, media.TranscriptionDisabledMarker())
 		}
-		if voice && c.speech != nil {
-			transcript, err := c.speech.Transcribe(ctx, attachment.Path)
+		if speech && c.speech != nil {
+			transcript, err := c.speech.Transcribe(ctx, media.TranscriptionRequest{Path: attachment.Path, DurationSeconds: duration})
 			if err != nil {
-				parts = append(parts, "[Voice transcription failed — inspect the attached audio manually: "+err.Error()+"]")
+				parts = append(parts, media.TranscriptionFailedMarker(err))
 				return joinParts(parts), nil
 			}
-			parts = append(parts, "[Generated voice transcription — may contain errors]\n"+strings.TrimSpace(transcript))
+			parts = append(parts, media.TranscriptionGeneratedMarker(transcript))
 		}
 	}
 	return joinParts(parts), nil
@@ -1196,27 +1196,43 @@ func hasMedia(message *waE2E.Message) bool {
 	return message.GetImageMessage() != nil || message.GetVideoMessage() != nil || message.GetPtvMessage() != nil || message.GetAudioMessage() != nil || message.GetDocumentMessage() != nil || message.GetStickerMessage() != nil
 }
 
-func downloadableMedia(message *waE2E.Message, id types.MessageID) (whatsmeow.DownloadableMessage, string, bool, uint64) {
+// downloadableMedia classifies one inbound message's media. Only WhatsApp
+// audio messages (PTT voice notes and ordinary audio files) are transcribable;
+// documents (even audio-named ones), images, videos, and stickers never are.
+// The returned duration is the transport-declared audio duration in seconds,
+// zero when it is missing or malformed.
+func downloadableMedia(message *waE2E.Message, id types.MessageID) (whatsmeow.DownloadableMessage, string, bool, int, uint64) {
 	message = unwrapMessage(message)
 	if document := message.GetDocumentMessage(); document != nil {
-		return document, firstName(document.GetFileName(), "document-"+string(id)+mediaExtension(document.GetMimetype())), false, document.GetFileLength()
+		return document, firstName(document.GetFileName(), "document-"+string(id)+mediaExtension(document.GetMimetype())), false, 0, document.GetFileLength()
 	}
 	if image := message.GetImageMessage(); image != nil {
-		return image, "image-" + string(id) + mediaExtension(image.GetMimetype()), false, image.GetFileLength()
+		return image, "image-" + string(id) + mediaExtension(image.GetMimetype()), false, 0, image.GetFileLength()
 	}
 	if video := message.GetVideoMessage(); video != nil {
-		return video, "video-" + string(id) + mediaExtension(video.GetMimetype()), false, video.GetFileLength()
+		return video, "video-" + string(id) + mediaExtension(video.GetMimetype()), false, 0, video.GetFileLength()
 	}
 	if video := message.GetPtvMessage(); video != nil {
-		return video, "video-" + string(id) + mediaExtension(video.GetMimetype()), false, video.GetFileLength()
+		return video, "video-" + string(id) + mediaExtension(video.GetMimetype()), false, 0, video.GetFileLength()
 	}
 	if audio := message.GetAudioMessage(); audio != nil {
-		return audio, "audio-" + string(id) + mediaExtension(audio.GetMimetype()), audio.GetPTT(), audio.GetFileLength()
+		return audio, "audio-" + string(id) + mediaExtension(audio.GetMimetype()), true, whatsappAudioDuration(audio), audio.GetFileLength()
 	}
 	if sticker := message.GetStickerMessage(); sticker != nil {
-		return sticker, "sticker-" + string(id) + mediaExtension(sticker.GetMimetype()), false, sticker.GetFileLength()
+		return sticker, "sticker-" + string(id) + mediaExtension(sticker.GetMimetype()), false, 0, sticker.GetFileLength()
 	}
-	return nil, "", false, 0
+	return nil, "", false, 0, 0
+}
+
+// whatsappAudioDuration converts the audio message's declared duration to a
+// portable nonnegative int. A duration that cannot be represented is treated
+// as missing so the duration-requiring cloud backend fails closed.
+func whatsappAudioDuration(audio *waE2E.AudioMessage) int {
+	seconds := uint64(audio.GetSeconds())
+	if seconds > uint64(^uint(0)>>1) {
+		return 0
+	}
+	return int(seconds)
 }
 
 func mediaExtension(mimeType string) string {

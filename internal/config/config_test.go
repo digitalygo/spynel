@@ -473,3 +473,73 @@ func TestStoreUpdateSavesAndReloadsSharedSnapshot(t *testing.T) {
 		t.Fatalf("shared snapshot was not refreshed: update=%q snapshot=%q", updated.Channels.Telegram.Name, store.Snapshot().Channels.Telegram.Name)
 	}
 }
+
+func TestSpeechProviderDefaultsAndNormalization(t *testing.T) {
+	cfg := Default()
+	if cfg.Speech.Provider != SpeechProviderParakeet {
+		t.Fatalf("default speech provider = %q, want %q", cfg.Speech.Provider, SpeechProviderParakeet)
+	}
+	if cfg.Speech.ElevenLabsAPIKeyEnv != DefaultElevenLabsAPIKeyEnv {
+		t.Fatalf("default API key env = %q, want %q", cfg.Speech.ElevenLabsAPIKeyEnv, DefaultElevenLabsAPIKeyEnv)
+	}
+	if cfg.Speech.ElevenLabsModelID != ElevenLabsModelScribeV2 {
+		t.Fatalf("default ElevenLabs model = %q, want %q", cfg.Speech.ElevenLabsModelID, ElevenLabsModelScribeV2)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	path := writeTestConfig(t, root, []byte("version: 1\nspeech:\n  provider: '  PARAKEET '\n  elevenlabs_model_id: ' Scribe_V1 '\n  elevenlabs_api_key_env: ' MY_KEY_1 '\n"))
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Speech.Provider != "parakeet" {
+		t.Fatalf("normalized provider = %q", loaded.Speech.Provider)
+	}
+	if loaded.Speech.ElevenLabsModelID != "scribe_v1" {
+		t.Fatalf("normalized model = %q", loaded.Speech.ElevenLabsModelID)
+	}
+	if loaded.Speech.ElevenLabsAPIKeyEnv != "MY_KEY_1" {
+		t.Fatalf("normalized API key env = %q", loaded.Speech.ElevenLabsAPIKeyEnv)
+	}
+}
+
+func TestSpeechProviderAndElevenLabsValidation(t *testing.T) {
+	root := t.TempDir()
+	for _, invalid := range []string{
+		"version: 1\nspeech: {provider: local}\n",
+		"version: 1\nspeech: {provider: ''}\n",
+		"version: 1\nspeech: {elevenlabs_model_id: scribe_v3}\n",
+		"version: 1\nspeech: {elevenlabs_model_id: ''}\n",
+		"version: 1\nspeech: {elevenlabs_api_key_env: ''}\n",
+		"version: 1\nspeech: {elevenlabs_api_key_env: '1BAD'}\n",
+		"version: 1\nspeech: {elevenlabs_api_key_env: 'A-B'}\n",
+		"version: 1\nspeech: {elevenlabs_api_key_env: 'has space'}\n",
+		"version: 1\nspeech: {elevenlabs_api_key_env: '" + strings.Repeat("a", 129) + "'}\n",
+	} {
+		path := writeTestConfig(t, root, []byte(invalid))
+		if _, err := Load(path); err == nil {
+			t.Fatalf("invalid speech setting accepted: %s", invalid)
+		}
+	}
+}
+
+func TestValidEnvironmentVariableName(t *testing.T) {
+	for value, want := range map[string]bool{
+		"ELEVENLABS_API_KEY":     true,
+		"_x9":                    true,
+		"a":                      true,
+		"":                       false,
+		"1BAD":                   false,
+		"A-B":                    false,
+		"has space":              false,
+		strings.Repeat("a", 128): true,
+		strings.Repeat("a", 129): false,
+	} {
+		if got := ValidEnvironmentVariableName(value); got != want {
+			t.Fatalf("ValidEnvironmentVariableName(%q) = %t, want %t", value, got, want)
+		}
+	}
+}
