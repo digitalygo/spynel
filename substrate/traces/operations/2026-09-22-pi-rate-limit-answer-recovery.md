@@ -1,6 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-22
+updated_at: 2026-09-22
 files_edited:
   - docs/architecture.md
   - docs/harness-compatibility.md
@@ -20,6 +21,7 @@ supporting_docs:
   - 2026-09-21-pi-retained-prompt-context.md
   - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md
   - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/settings.md
+  - https://github.com/digitalygo/spynel/releases/tag/v1.4.0
 ---
 
 # Pi rate-limit answer recovery
@@ -116,3 +118,26 @@ No authenticated live-provider rate-limit or retry canary was run for this fix, 
 - [Pi retained prompt context](2026-09-21-pi-retained-prompt-context.md)
 - [Pi RPC documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)
 - [Pi settings documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/settings.md)
+
+## Update 2026-09-22: v1.4.0 publication
+
+### Summary
+
+Rate-limit answer recovery is now published. The [v1.4.0 release](https://github.com/digitalygo/spynel/releases/tag/v1.4.0) is tagged at `62be722371e82c2cbee09b8acfb7b9ae931a68df`, the exact commit of this fix (`fix(pi): deliver recovered answers after transient errors`). The earlier "Live canary and release status" note is resolved for publication: the change is committed, packaged, and published, and v1.4.0 is the current published release. The note's statement that no live-provider rate-limit canary was run remains accurate: publication evidence is the release process plus the live service running 1.4.0, not a canary.
+
+### Technical reasoning
+
+The release tag targets this fix's commit, so the success-first settlement rule described above is what shipped to users. v1.4.0 bundles four changes since v1.3.0: retained-context prompt dedup, Pi session and Telegram topic naming with `/pi name`, the at-most-once topic rename, and this rate-limit answer recovery. Release packaging was validated first on the local host: `spynel_1.4.0_linux_amd64.tar.gz` with sha256 `cc14f0a3e5b0917ab41fcb36c34ee85e1b647152605ffe4220b20f9cc079230a`, whose extracted binary reports version 1.4.0. Manual validation run 35733023893 then exercised verify and all four native builds with publish skipped, and release run 35734040515 passed verify, all four native builds, and publish. The stable release carries four native archives plus `checksums.txt`. The npm package `@digitalygo/spynel@1.4.0` is `latest`.
+
+### Impact
+
+Installed users now receive successful-retry answers through the TUI, plain CLI, Telegram, and WhatsApp instead of the stale rate-limit terminal, and the work is no longer uncommitted. The live npm-managed home service was updated to 1.4.0 through the official `spynel update` path, so the corrected settlement rule runs in ordinary operation there. The known Linuxbrew `npmrc` quirk occurred during that update: the 0444 file produced `EACCES` and was handled with a temporary owner-write plus trap restore; npm's reify normalized the file's whitespace to the same `prefix` value and the 0444 mode was restored afterwards.
+
+### Validation
+
+- Release evidence: tag `v1.4.0` at `62be722371e82c2cbee09b8acfb7b9ae931a68df`, the commit of this fix; the release carries `darwin_amd64`, `darwin_arm64`, `linux_amd64`, and `linux_arm64` archives plus `checksums.txt`.
+- Run evidence: manual validation run 35733023893 passed verify and all four native builds with publish skipped; release run 35734040515 passed verify, all four native builds, and publish.
+- Package evidence: the extracted `spynel_1.4.0_linux_amd64.tar.gz` binary reports version 1.4.0; sha256 `cc14f0a3e5b0917ab41fcb36c34ee85e1b647152605ffe4220b20f9cc079230a`.
+- Registry evidence: `@digitalygo/spynel@1.4.0` is `latest` with SLSA provenance v1 via Trusted Publishing without tokens; a clean-prefix install reports 1.4.0 after brief registry edge convergence.
+- Live service evidence after the official `spynel update`: Telegram and Pi connected and idle, model, reasoning, and service inherited, reviews `never`, updater current at 1.4.0, and the `/pi` catalog includes `/pi name`.
+- Non-blocking warnings: Node 20 `actions/upload-artifact` deprecation annotations appeared on the workflow runs and did not affect the builds or published artifacts.

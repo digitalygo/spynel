@@ -1,7 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-21
-updated_at: 2026-09-21
+updated_at: 2026-09-22
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -45,6 +45,7 @@ supporting_docs:
   - https://core.telegram.org/bots/api#editforumtopic
   - https://core.telegram.org/bots/api#forumtopiccreated
   - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md
+  - https://github.com/digitalygo/spynel/releases/tag/v1.4.0
 ---
 
 # Pi session and Telegram topic naming
@@ -179,3 +180,26 @@ The user asked for one simple rule: rename the topic before the user would ordin
 - `git diff --check` reported no whitespace errors.
 - Quality gate: PASS.
 - Security gate: PASS with two minor non-blocking advisories: the bounded-set comment overstated the automatic no-repeat guarantee, and `isTopicNotModified` matches `TOPIC_NOT_MODIFIED` as a description substring rather than an exact code. The comment wording was corrected in this pass; the substring match is accepted as bounded provider tolerance.
+
+## Update 2026-09-22: v1.4.0 publication
+
+### Summary
+
+The session and topic naming work is now published. Release [v1.4.0](https://github.com/digitalygo/spynel/releases/tag/v1.4.0) was cut from commit `62be722371e82c2cbee09b8acfb7b9ae931a68df`; the original naming change landed as `dc8baeb` (`feat(pi): name new sessions and Telegram topics`) and the at-most-once rename follow-up as `40f557c` (`feat(telegram): rename each new topic at most once`). The earlier "Release and publication status" note is superseded: the work is no longer uncommitted and v1.4.0 is the current published release.
+
+### Technical reasoning
+
+v1.4.0 bundles four changes since v1.3.0: retained-context prompt dedup, the session and topic naming recorded here with `/pi name`, the at-most-once topic rename recorded in the update above, and Pi rate-limit answer recovery. Release packaging was validated first on the local host: `spynel_1.4.0_linux_amd64.tar.gz` with sha256 `cc14f0a3e5b0917ab41fcb36c34ee85e1b647152605ffe4220b20f9cc079230a`, whose extracted binary reports version 1.4.0. Manual validation run 35733023893 then exercised verify and all four native builds with publish skipped, and release run 35734040515 passed verify, all four native builds, and publish. The stable release carries four native archives plus `checksums.txt`. The npm package `@digitalygo/spynel@1.4.0` is `latest`.
+
+### Impact
+
+Installed users now receive automatic first-message naming, the unconditional at-most-once topic rename, and the explicit `/pi name` control, and the work is no longer uncommitted. The live npm-managed home service was updated to 1.4.0 through the official `spynel update` path, and its `/pi` catalog includes `/pi name`, so the published control surface is live in ordinary operation. The known Linuxbrew `npmrc` quirk occurred during that update: the 0444 file produced `EACCES` and was handled with a temporary owner-write plus trap restore; npm's reify normalized the file's whitespace to the same `prefix` value and the 0444 mode was restored afterwards.
+
+### Validation
+
+- Release evidence: tag `v1.4.0` at `62be722371e82c2cbee09b8acfb7b9ae931a68df`; the release carries `darwin_amd64`, `darwin_arm64`, `linux_amd64`, and `linux_arm64` archives plus `checksums.txt`.
+- Run evidence: manual validation run 35733023893 passed verify and all four native builds with publish skipped; release run 35734040515 passed verify, all four native builds, and publish.
+- Package evidence: the extracted `spynel_1.4.0_linux_amd64.tar.gz` binary reports version 1.4.0; sha256 `cc14f0a3e5b0917ab41fcb36c34ee85e1b647152605ffe4220b20f9cc079230a`.
+- Registry evidence: `@digitalygo/spynel@1.4.0` is `latest` with SLSA provenance v1 via Trusted Publishing without tokens; a clean-prefix install reports 1.4.0 after brief registry edge convergence.
+- Live service evidence after the official `spynel update`: Telegram and Pi connected and idle, model, reasoning, and service inherited, reviews `never`, updater current at 1.4.0, and the `/pi` catalog includes `/pi name`.
+- Non-blocking warnings: Node 20 `actions/upload-artifact` deprecation annotations appeared on the workflow runs and did not affect the builds or published artifacts.
