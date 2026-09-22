@@ -65,14 +65,15 @@ type piProcess struct {
 type piTurn struct {
 	emit core.Emit
 
-	mu             sync.Mutex
-	text           strings.Builder
-	currentMessage strings.Builder
-	lastMessage    string
-	assistantOpen  bool
-	errorText      string
-	completed      bool
-	deliveryMu     sync.Mutex
+	mu                 sync.Mutex
+	text               strings.Builder
+	currentMessage     strings.Builder
+	successfulMessages []string
+	lastMessage        string
+	assistantOpen      bool
+	errorText          string
+	completed          bool
+	deliveryMu         sync.Mutex
 }
 
 type piResponse struct {
@@ -863,14 +864,14 @@ func (process *piProcess) handleEvent(kind string, event map[string]json.RawMess
 		}
 		_ = json.Unmarshal(event["message"], &message)
 		if message.Role == "assistant" {
-			turn.finishMessage(process.session.ID, piMessageText(message.Content))
 			if message.ErrorMessage != "" || message.StopReason == "error" {
-				turn.mu.Lock()
-				turn.errorText = message.ErrorMessage
-				if turn.errorText == "" {
-					turn.errorText = "Pi assistant message failed"
+				errorText := message.ErrorMessage
+				if errorText == "" {
+					errorText = "Pi assistant message failed"
 				}
-				turn.mu.Unlock()
+				turn.failMessage(process.session.ID, piMessageText(message.Content), errorText)
+			} else {
+				turn.finishMessage(process.session.ID, piMessageText(message.Content))
 			}
 		}
 	case "tool_execution_start":
@@ -949,8 +950,10 @@ func (turn *piTurn) appendText(threadID, text string) {
 	}
 }
 
-func (turn *piTurn) finishMessage(threadID, authoritative string) {
-	turn.mu.Lock()
+// reconcileMessage merges the provider's authoritative text for the just-ended
+// assistant message into the streamed transcript and reports the suffix that
+// had not been streamed yet. Callers hold turn.mu.
+func (turn *piTurn) reconcileMessage(authoritative string) string {
 	current := turn.currentMessage.String()
 	missing := ""
 	if authoritative != "" && current != authoritative {
@@ -969,10 +972,38 @@ func (turn *piTurn) finishMessage(threadID, authoritative string) {
 		turn.text.WriteString(missing)
 		turn.currentMessage.WriteString(missing)
 	}
+	return missing
+}
+
+// finishMessage records one successful assistant message. The completed item
+// becomes part of the settled turn and clears any pending error from an
+// earlier failed attempt, because Pi retries transient failures inside the same
+// settled run and only the retry's message belongs to the result.
+func (turn *piTurn) finishMessage(threadID, authoritative string) {
+	turn.mu.Lock()
+	missing := turn.reconcileMessage(authoritative)
+	turn.successfulMessages = append(turn.successfulMessages, turn.currentMessage.String())
 	turn.lastMessage = authoritative
 	if turn.lastMessage == "" {
 		turn.lastMessage = turn.currentMessage.String()
 	}
+	turn.errorText = ""
+	turn.assistantOpen = false
+	emit := turn.emit
+	turn.mu.Unlock()
+	if emit != nil && missing != "" {
+		emit(core.Event{Kind: core.EventDelta, Text: missing, ThreadID: threadID})
+	}
+}
+
+// failMessage records a failed assistant message. Pi drops the errored message
+// and retries it, so its streamed text is reconciled for live output but never
+// becomes part of the settled turn; a later successful message clears the
+// pending error.
+func (turn *piTurn) failMessage(threadID, authoritative, errorText string) {
+	turn.mu.Lock()
+	missing := turn.reconcileMessage(authoritative)
+	turn.errorText = errorText
 	turn.assistantOpen = false
 	emit := turn.emit
 	turn.mu.Unlock()
@@ -1001,10 +1032,17 @@ func (process *piProcess) finishTurn(turn *piTurn) {
 	turn.completed = true
 	text := turn.text.String()
 	last := turn.lastMessage
-	if last == "" {
+	errorText := turn.errorText
+	successful := len(turn.successfulMessages) > 0
+	if successful {
+		// Pi retries transient provider failures inside one settled run and
+		// drops each errored message. Only successful assistant messages are
+		// part of the delivered turn, so a late failure never swallows the
+		// answer that the run actually produced.
+		text = strings.Join(turn.successfulMessages, "\n")
+	} else if last == "" {
 		last = text
 	}
-	errorText := turn.errorText
 	emit := turn.emit
 	turn.mu.Unlock()
 	process.mu.Lock()
@@ -1016,7 +1054,7 @@ func (process *piProcess) finishTurn(turn *piTurn) {
 	if emit == nil {
 		return
 	}
-	if errorText != "" {
+	if errorText != "" && !successful {
 		emit(core.Event{Kind: core.EventError, Text: errorText, ThreadID: process.session.ID, Done: true,
 			Execution: &core.ExecutionStatus{State: "error", Detail: errorText}})
 		return

@@ -170,7 +170,7 @@ func runHarnessFixture(mode string) int {
 		return runCodexFixture(mode)
 	case "claude-stream", "claude-steer", "claude-text", "claude-interrupt", "claude-help-missing-flag", "claude-init-changed-event", "claude-terminal-error", "claude-result-nonzero":
 		return runClaudeFixture(mode)
-	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath", "pi-session-named":
+	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath", "pi-session-named", "pi-retry-success", "pi-all-failed", "pi-success-then-failed", "pi-no-message":
 		return runPiFixture(mode)
 	case "acp-lifecycle", "acp-interrupt", "acp-version-mismatch", "acp-session-error":
 		return runACPFixture(mode)
@@ -252,8 +252,11 @@ func runPiFixture(mode string) int {
 	delta := func(text string) {
 		write(map[string]any{"type": "message_update", "assistantMessageEvent": map[string]any{"type": "text_delta", "delta": text}})
 	}
+	messageEndWith := func(text, reason, errorMessage string) {
+		write(map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "stopReason": reason, "errorMessage": errorMessage, "content": []any{map[string]any{"type": "text", "text": text}}}})
+	}
 	messageEnd := func(text, reason string) {
-		write(map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "stopReason": reason, "content": []any{map[string]any{"type": "text", "text": text}}}})
+		messageEndWith(text, reason, "")
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -343,12 +346,54 @@ func runPiFixture(mode string) int {
 			respond(message, map[string]any{"levels": levels})
 		case "prompt":
 			respond(message, map[string]any{})
+			if mode == "pi-no-message" {
+				write(map[string]any{"type": "agent_end"})
+				go func() {
+					time.Sleep(80 * time.Millisecond)
+					write(map[string]any{"type": "agent_settled"})
+				}()
+				break
+			}
 			messageStart()
 			if mode == "pi-extension-ui" {
 				write(map[string]any{"type": "extension_ui_request", "id": "ui-1", "method": "confirm", "title": "Run project-local agents?", "message": "Agents: demo"})
 				write(map[string]any{"type": "extension_ui_request", "id": "ui-2", "method": "notify", "message": "fire-and-forget"})
 			} else if mode == "pi-steer" {
 				delta("first")
+			} else if mode == "pi-retry-success" {
+				// Pi retries a transient provider failure inside one settled run:
+				// the failed attempt is dropped and only the retry is delivered.
+				delta("rate limited partial")
+				messageEndWith("rate limited partial", "error", "Error 429 rate-limited upstream")
+				write(map[string]any{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 1})
+				messageStart()
+				delta("hello ")
+				delta("world")
+				messageEnd("hello world", "stop")
+				write(map[string]any{"type": "agent_end"})
+				go func() {
+					time.Sleep(80 * time.Millisecond)
+					write(map[string]any{"type": "agent_settled"})
+				}()
+			} else if mode == "pi-all-failed" {
+				delta("doomed partial")
+				messageEndWith("doomed partial", "error", "Error 429 rate-limited upstream")
+				write(map[string]any{"type": "agent_end"})
+				go func() {
+					time.Sleep(80 * time.Millisecond)
+					write(map[string]any{"type": "agent_settled"})
+				}()
+			} else if mode == "pi-success-then-failed" {
+				delta("answer")
+				messageEnd("answer", "stop")
+				messageStart()
+				delta("tail partial")
+				messageEndWith("tail partial", "error", "Error 500 upstream failure")
+				write(map[string]any{"type": "agent_end"})
+				go func() {
+					time.Sleep(80 * time.Millisecond)
+					write(map[string]any{"type": "agent_settled"})
+				}()
 			} else if mode == "pi-compaction-events" {
 				write(map[string]any{"type": "compaction_start"})
 				delta("hello ")
