@@ -1,6 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-22
+updated_at: 2026-09-22
 files_edited:
   - internal/app/AGENTS.md
   - internal/app/job_archive.go
@@ -18,6 +19,7 @@ supporting_docs:
   - ../../../internal/app/AGENTS.md
   - ../../../internal/localapi/AGENTS.md
   - ../../../internal/channel/tui/AGENTS.md
+  - https://github.com/digitalygo/spynel/releases/tag/v1.5.0
 ---
 
 # Job archive shutdown quiesce
@@ -106,3 +108,24 @@ This fix is part of the pending v1.5.0 release and unblocks its release validati
 - [Application service DOX](../../../internal/app/AGENTS.md)
 - [Local API DOX](../../../internal/localapi/AGENTS.md)
 - [Terminal UI DOX](../../../internal/channel/tui/AGENTS.md)
+
+## Update 2026-09-22: v1.5.0 publication
+
+### Summary
+
+v1.5.0 is published with this fix included, so the pending-v1.5.0 note above is resolved. The stable [GitHub release v1.5.0](https://github.com/digitalygo/spynel/releases/tag/v1.5.0) (annotated tag object `6189d5e83b9ba98c973927bd297955e57a305f85`, target commit `3345548e8fecc315387df5573be34772c05a1082`) ships four native archives plus `checksums.txt`, and `@digitalygo/spynel@1.5.0` is the npm `latest` with SLSA provenance v1. The first validation attempt at `af4d985` was blocked by the `internal/localapi` `TempDir` cleanup races this fix removes, and the retried validation after `3345548` passed.
+
+### Technical reasoning
+
+The flake fix was a release gate, not just CI hygiene: the pre-fix validation run failed on the same `TestSocketLifecycle` `TempDir` race the fence and the dispatch drain remove. The flow then ran a manual validation with publish skipped (35782622472) and the publishing release run (35783688043), both with the fix in the tree.
+
+### Impact
+
+The shutdown and quiesce behavior is live in v1.5.0 for native and npm users. No further release action remains for this change, and the release status note above is superseded by this section.
+
+### Validation
+
+- Manual validation run 35782622472 passed verify and all four native builds with publish skipped.
+- Release run 35783688043 passed verify, all four native builds, and publish.
+- `gh release view v1.5.0` confirms a stable release with `checksums.txt` plus the four native archives, and `npm view` confirms 1.5.0 as `latest` with SLSA provenance v1.
+- This record's update was checked with `scripts/dev.sh dox` and `git diff --check`, plus a structural Markdown scan for one H1, heading progression, no em dash, and a single trailing newline.

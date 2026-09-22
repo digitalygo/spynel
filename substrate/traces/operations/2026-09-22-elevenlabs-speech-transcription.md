@@ -49,6 +49,7 @@ supporting_docs:
   - ../../../docs/AGENTS.md
   - ../../../internal/config/AGENTS.md
   - https://elevenlabs.io/pricing
+  - https://github.com/digitalygo/spynel/releases/tag/v1.5.0
 ---
 
 # ElevenLabs speech transcription
@@ -172,3 +173,41 @@ Documentation pass checks run for this update on the completed tree:
 - `go test -count=1 ./internal/media ./internal/config ./internal/app ./internal/agentdocs` passed.
 - `git diff --check` reported no whitespace errors.
 - A structural Markdown scan of every added line across the changed files confirmed one H1 per file, uninterrupted heading progression, no em dash, no trailing whitespace, and a single trailing newline.
+
+## Update 2026-09-22: v1.5.0 publication
+
+### Summary
+
+v1.5.0 is published and carries this feature from the provider commits through the default fallback. The stable [GitHub release v1.5.0](https://github.com/digitalygo/spynel/releases/tag/v1.5.0) (annotated tag object `6189d5e83b9ba98c973927bd297955e57a305f85`, target commit `3345548e8fecc315387df5573be34772c05a1082`) ships four native archives plus `checksums.txt`, and `@digitalygo/spynel@1.5.0` is the npm `latest` with SLSA provenance v1 from Trusted Publishing. The release bundles `015542e` (provider, audio-file scope, shared markers), `af4d985` (default `elevenlabs` with the missing-key local fallback), and `3345548` (the shutdown and quiesce fix). The live npm-managed home service was updated to 1.5.0 through the official `spynel update` path. Its restarted process does not inherit the interactive shell's `ELEVENLABS_API_KEY`, so the service currently transcribes through the missing-key local Parakeet fallback.
+
+### Technical reasoning
+
+The pre-release validation attempt at `af4d985` was blocked by intermittent `internal/localapi` `TempDir` cleanup races in CI. The job-archive shutdown and quiesce fix, committed as `3345548`, removed that failure mode (see [Job archive shutdown quiesce](2026-09-22-job-archive-shutdown-quiesce.md)), and the retried validation passed. The pipeline then ran a manual validation (35782622472) with publish skipped, followed by the release run (35783688043) that repeated the checks and performed the actual publish. The release notes carry the upgrade note the security gate required for the default-provider switch.
+
+The live update exercised the release end to end. The Linuxbrew npmrc quirk was handled with a temporary owner-write plus a `trap` restore, and the npmrc hash was unchanged this time. The environment mismatch is the operational risk the earlier update described: a key exported only in an interactive shell is absent from a detached service, so the missing-key path selects local Parakeet. One restart from a key-bearing shell is enough for ElevenLabs to engage, and later in-place re-exec updates preserve that process environment. The transcription markers still do not name the producing provider, so the fallback is not visible from the transcript itself; that remains a known observability gap.
+
+### Impact
+
+- The cloud default with the sentinel-only Parakeet fallback is now live for consumers of the native archives and npm `latest`, not only for the development tree.
+- The live home service is healthy on the fallback path: Telegram and Pi are connected and idle, settings are inherited, `reviews` stays `never`, and the updater reports the current version 1.5.0.
+- Until the service is restarted from a key-bearing shell, accepted audio is transcribed locally rather than by ElevenLabs. No message flow is lost, and every other provider outcome stays visible, because the fallback remains limited to the missing-key sentinel.
+- The shutdown and quiesce fix that unblocked validation ships in the same release, so the CI `TempDir` flake mode described in the sibling record is gone from v1.5.0 onward.
+- Observability gap: nothing in a delivered transcript distinguishes ElevenLabs from Parakeet output.
+
+### Validation
+
+Publication and deployment evidence gathered on 2026-09-22:
+
+- Manual validation run 35782622472 passed verify and all four native builds with publish skipped.
+- Release run 35783688043 passed verify, all four native builds, and publish.
+- Local host package validation passed: `spynel_1.5.0_linux_amd64.tar.gz` with sha256 `4437fa3dab7507de8b341f806b6873f1e2e024270566756886afb2b4710d1f6e`, and the extracted binary reports version 1.5.0.
+- `gh release view v1.5.0` reports a non-draft, non-prerelease release with `checksums.txt`, `spynel_1.5.0_darwin_amd64.tar.gz`, `spynel_1.5.0_darwin_arm64.tar.gz`, `spynel_1.5.0_linux_amd64.tar.gz`, and `spynel_1.5.0_linux_arm64.tar.gz`.
+- `npm view` reports `@digitalygo/spynel@1.5.0` as `latest` with SLSA provenance v1 (`https://slsa.dev/provenance/v1`) published by GitHub Actions OIDC, and a clean-prefix install reported 1.5.0 after the usual brief registry edge convergence.
+- The live npm-managed home service runs 1.5.0 after the official `spynel update`; Telegram and Pi are connected and idle, settings are inherited, `reviews` is `never`, and the updater is current at 1.5.0.
+- The restarted service process lacks `ELEVENLABS_API_KEY`, matching the missing-key fallback state described above.
+
+Checks for this record's update on the completed tree:
+
+- `scripts/dev.sh dox` reported DOX coverage valid for 51 tracked directories.
+- `git diff --check` reported no whitespace errors.
+- A structural Markdown scan of every added line confirmed one H1 in this file, uninterrupted heading progression, no em dash, no trailing whitespace, and a single trailing newline.
