@@ -107,16 +107,17 @@ var ErrConversationLabelUnsupported = errors.New("channel does not support conve
 
 // ConversationLabeler renames one provider-visible conversation label when a
 // transport represents conversations as named objects. Implementations
-// re-apply their own authorization and route rules; onlyIfImplicit limits the
-// automatic naming path to labels the transport still considers unset.
+// re-apply their own authorization and route rules. An automatic rename
+// (force=false) is at most once per conversation and a conversation Spynel
+// already renamed is a silent no-op; force=true always renames.
 type ConversationLabeler interface {
-	RenameConversation(ctx context.Context, conversation, label string, onlyIfImplicit bool) error
+	RenameConversation(ctx context.Context, conversation, label string, force bool) error
 }
 
 // ConversationLabelRouter routes a conversation label to the active
 // generation of a named channel.
 type ConversationLabelRouter interface {
-	RenameConversation(ctx context.Context, channelName, conversation, label string, onlyIfImplicit bool) error
+	RenameConversation(ctx context.Context, channelName, conversation, label string, force bool) error
 }
 
 // ProactiveDeliverer sends a complete assistant message after the inbound

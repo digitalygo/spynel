@@ -287,7 +287,7 @@ func (s *Supervisor) DeliverEvent(ctx context.Context, name, conversation, event
 // active generation of the named channel. A missing generation or a channel
 // without the capability reports an explicit sentinel so callers can treat
 // inapplicable channels as a silent no-op.
-func (s *Supervisor) RenameConversation(ctx context.Context, name, conversation, label string, onlyIfImplicit bool) error {
+func (s *Supervisor) RenameConversation(ctx context.Context, name, conversation, label string, force bool) error {
 	s.mu.Lock()
 	running := s.running[name]
 	var instance Channel
@@ -302,7 +302,7 @@ func (s *Supervisor) RenameConversation(ctx context.Context, name, conversation,
 	if !ok {
 		return fmt.Errorf("%s does not support conversation labels: %w", name, ErrConversationLabelUnsupported)
 	}
-	return labeler.RenameConversation(ctx, conversation, label, onlyIfImplicit)
+	return labeler.RenameConversation(ctx, conversation, label, force)
 }
 
 func (s *Supervisor) runOne(ctx context.Context, name string, running *runningChannel, instance Channel) {

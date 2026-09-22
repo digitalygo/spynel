@@ -19,16 +19,16 @@ type recordingLabelRouter struct {
 }
 
 type labelRouterCall struct {
-	channelName    string
-	conversation   string
-	label          string
-	onlyIfImplicit bool
+	channelName  string
+	conversation string
+	label        string
+	force        bool
 }
 
-func (r *recordingLabelRouter) RenameConversation(_ context.Context, channelName, conversation, label string, onlyIfImplicit bool) error {
+func (r *recordingLabelRouter) RenameConversation(_ context.Context, channelName, conversation, label string, force bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, labelRouterCall{channelName: channelName, conversation: conversation, label: label, onlyIfImplicit: onlyIfImplicit})
+	r.calls = append(r.calls, labelRouterCall{channelName: channelName, conversation: conversation, label: label, force: force})
 	return r.err
 }
 
@@ -94,8 +94,39 @@ func TestAutomaticSessionNamingNamesTheFirstMessage(t *testing.T) {
 	if len(routed) != 1 {
 		t.Fatalf("conversation label calls = %#v", routed)
 	}
-	if routed[0].channelName != "telegram" || routed[0].conversation != "TG-7-topic-5" || routed[0].label != "Fix the login bug" || !routed[0].onlyIfImplicit {
+	if routed[0].channelName != "telegram" || routed[0].conversation != "TG-7-topic-5" || routed[0].label != "Fix the login bug" || routed[0].force {
 		t.Fatalf("conversation label call = %#v", routed[0])
+	}
+}
+
+func TestAutomaticSessionNamingNamesEveryNewSessionAfterClear(t *testing.T) {
+	target := newPiControlHarness()
+	service := newPiControlService(t, target)
+	router := &recordingLabelRouter{}
+	service.ConversationLabels = router
+	runPiControlMessage(t, service, core.Message{Channel: "telegram", Conversation: "TG-7-topic-5", Text: "Fix the login bug"})
+	runPiControlMessage(t, service, core.Message{Channel: "telegram", Conversation: "TG-7-topic-5", Text: "/clear"})
+	final := runPiControlMessage(t, service, core.Message{Channel: "telegram", Conversation: "TG-7-topic-5", Text: "Fix the signup bug"})
+	if final.Kind != core.EventFinal {
+		t.Fatalf("post-clear turn = %#v", final)
+	}
+	target.mu.Lock()
+	calls := append([]piNameCall(nil), target.nameCalls...)
+	target.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("naming calls across /clear = %#v", calls)
+	}
+	if calls[1].name != "Fix the signup bug" || !calls[1].onlyIfEmpty {
+		t.Fatalf("post-clear naming call = %#v", calls[1])
+	}
+	// The transport owns the once-only automatic topic rename: the adapter
+	// suppresses this repeated automatic request without another provider call.
+	routed := router.snapshot()
+	if len(routed) != 2 {
+		t.Fatalf("label routing across /clear = %#v", routed)
+	}
+	if routed[1].force || routed[1].conversation != "TG-7-topic-5" || routed[1].label != "Fix the signup bug" {
+		t.Fatalf("post-clear label routing = %#v", routed[1])
 	}
 }
 
@@ -318,7 +349,7 @@ func TestPiNameCommandRenamesTheSessionAndPrivateTopic(t *testing.T) {
 		t.Fatalf("name call = %#v", calls[0])
 	}
 	routed := router.snapshot()
-	if len(routed) != 1 || routed[0].onlyIfImplicit || routed[0].label != "Release Candidate" || routed[0].conversation != "TG-7-topic-3" {
+	if len(routed) != 1 || !routed[0].force || routed[0].label != "Release Candidate" || routed[0].conversation != "TG-7-topic-3" {
 		t.Fatalf("topic rename call = %#v", routed)
 	}
 	if !strings.Contains(reply.Text, "Pi session renamed to `Release Candidate`") || !strings.Contains(reply.Text, "topic was renamed") {

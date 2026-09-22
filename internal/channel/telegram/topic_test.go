@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -14,19 +15,18 @@ import (
 
 	"github.com/digitalygo/spynel/internal/channel"
 	"github.com/digitalygo/spynel/internal/config"
-	"github.com/digitalygo/spynel/internal/core"
 )
 
-// topicTitleRecorder captures every editForumTopic payload and replies with a
-// configurable response per call so provider outcomes stay deterministic.
-type topicTitleRecorder struct {
+// topicRenameRecorder captures every editForumTopic payload and replies with
+// a configurable response per call so provider outcomes stay deterministic.
+type topicRenameRecorder struct {
 	mu       sync.Mutex
 	requests []map[string]any
 	statuses []int
 	bodies   []string
 }
 
-func (r *topicTitleRecorder) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+func (r *topicRenameRecorder) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	var payload map[string]any
 	_ = json.NewDecoder(request.Body).Decode(&payload)
 	r.mu.Lock()
@@ -45,13 +45,13 @@ func (r *topicTitleRecorder) ServeHTTP(writer http.ResponseWriter, request *http
 	_, _ = writer.Write([]byte(body))
 }
 
-func (r *topicTitleRecorder) snapshot() []map[string]any {
+func (r *topicRenameRecorder) snapshot() []map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]map[string]any(nil), r.requests...)
 }
 
-func newTopicTitleBot(t *testing.T, recorder http.Handler) *Bot {
+func newTopicRenameBot(t *testing.T, recorder http.Handler) *Bot {
 	t.Helper()
 	server := httptest.NewServer(recorder)
 	t.Cleanup(server.Close)
@@ -60,83 +60,13 @@ func newTopicTitleBot(t *testing.T, recorder http.Handler) *Bot {
 	return bot
 }
 
-func TestTelegramTopicTitleTrackingIsTriStateBoundedAndResetSafe(t *testing.T) {
-	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
-	bot.client.Transport = telegramRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("title tracking contacted Telegram")
-	})
-	handled := 0
-	update := func(message *telegramMessage) {
-		t.Helper()
-		bot.processUpdate(context.Background(), func(context.Context, core.Message, core.Emit) error {
-			handled++
-			return nil
-		}, telegramUpdate{Message: message})
-	}
-	serviceMessage := func(thread int64, created *telegramForumTopicCreated, edited *telegramForumTopicEdited) *telegramMessage {
-		return &telegramMessage{
-			MessageID: 1, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"}, MessageThreadID: thread,
-			Date: 1, ForumTopicCreated: created, ForumTopicEdited: edited,
-		}
-	}
-	implicit := topicTitleKey{chatID: 7, threadID: 5}
-	if got := bot.topicTitleState(implicit); got != topicTitleUnknown {
-		t.Fatalf("initial topic state = %v, want unknown", got)
-	}
-	update(serviceMessage(5, &telegramForumTopicCreated{Name: "New chat", IsNameImplicit: true}, nil))
-	if got := bot.topicTitleState(implicit); got != topicTitleImplicit {
-		t.Fatalf("implicit created state = %v", got)
-	}
-	explicit := topicTitleKey{chatID: 7, threadID: 6}
-	update(serviceMessage(6, &telegramForumTopicCreated{Name: "Release planning"}, nil))
-	if got := bot.topicTitleState(explicit); got != topicTitleExplicit {
-		t.Fatalf("explicit created state = %v", got)
-	}
-	update(serviceMessage(5, nil, &telegramForumTopicEdited{}))
-	if got := bot.topicTitleState(implicit); got != topicTitleImplicit {
-		t.Fatalf("icon-only edit changed state to %v", got)
-	}
-	update(serviceMessage(5, nil, &telegramForumTopicEdited{Name: "Renamed"}))
-	if got := bot.topicTitleState(implicit); got != topicTitleExplicit {
-		t.Fatalf("named edit state = %v", got)
-	}
-	unauthorized := topicTitleKey{chatID: 7, threadID: 9}
-	message := serviceMessage(9, &telegramForumTopicCreated{Name: "New chat", IsNameImplicit: true}, nil)
-	message.From = telegramUser{ID: 99}
-	update(message)
-	if got := bot.topicTitleState(unauthorized); got != topicTitleUnknown {
-		t.Fatalf("unauthorized sender recorded state %v", got)
-	}
-	if handled != 0 {
-		t.Fatalf("service messages reached the handler %d times", handled)
-	}
-
-	// Restart-equivalent state is unknown, which fails closed for only-if-implicit.
-	restarted := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
-	if got := restarted.topicTitleState(implicit); got != topicTitleUnknown {
-		t.Fatalf("fresh process state = %v, want unknown", got)
-	}
-
-	// Bounded eviction keeps the map at its cap without refusing new records.
-	filled := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
-	for index := 0; index < maxTrackedTopicTitles; index++ {
-		filled.setTopicTitle(topicTitleKey{chatID: 7, threadID: int64(1000 + index)}, topicTitleExplicit)
-	}
-	filled.setTopicTitle(topicTitleKey{chatID: 7, threadID: 9000}, topicTitleImplicit)
-	filled.topicTitleMu.Lock()
-	size := len(filled.topicTitles)
-	state := filled.topicTitles[topicTitleKey{chatID: 7, threadID: 9000}]
-	filled.topicTitleMu.Unlock()
-	if size > maxTrackedTopicTitles || state != topicTitleImplicit {
-		t.Fatalf("bounded eviction: size=%d state=%v", size, state)
-	}
-}
-
-func TestTelegramRenameConversationPayLoadAndImplicitState(t *testing.T) {
-	recorder := &topicTitleRecorder{}
-	bot := newTopicTitleBot(t, recorder)
-	bot.setTopicTitle(topicTitleKey{chatID: 7, threadID: 5}, topicTitleImplicit)
-	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release candidate", true); err != nil {
+func TestTelegramAutomaticRenameFiresOncePerConversation(t *testing.T) {
+	recorder := &topicRenameRecorder{}
+	bot := newTopicRenameBot(t, recorder)
+	// A first-session trigger always renames the private topic: there is no
+	// title-state input to consult, so a freshly created topic that is still
+	// called "New chat" is replaced without any transport-reported state.
+	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release candidate", false); err != nil {
 		t.Fatal(err)
 	}
 	requests := recorder.snapshot()
@@ -147,45 +77,91 @@ func TestTelegramRenameConversationPayLoadAndImplicitState(t *testing.T) {
 	if !reflect.DeepEqual(requests[0], want) {
 		t.Fatalf("editForumTopic payload = %#v, want %#v", requests[0], want)
 	}
-	if got := bot.topicTitleState(topicTitleKey{chatID: 7, threadID: 5}); got != topicTitleExplicit {
-		t.Fatalf("successful rename state = %v", got)
+	if !bot.topicRenamed("TG-7-topic-5") {
+		t.Fatal("successful automatic rename did not mark the conversation renamed")
 	}
-	// A repeated automatic rename is now a silent no-op because the state is
-	// explicit, while a forced rename still reaches the provider.
-	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release candidate", true); err != nil {
+	// A later automatic attempt for the same conversation, such as a new
+	// session created after /clear, is a silent no-op with zero provider calls.
+	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release candidate", false); err != nil {
 		t.Fatal(err)
 	}
 	if len(recorder.snapshot()) != 1 {
-		t.Fatal("only-if-implicit rename repeated after success")
+		t.Fatal("automatic rename repeated after success")
 	}
-	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Forced", false); err != nil {
-		t.Fatal(err)
-	}
-	if len(recorder.snapshot()) != 2 {
-		t.Fatal("forced rename did not reach the provider")
+	bot.renamedTopicsMu.Lock()
+	_, secondConversation := bot.renamedTopics["TG-7-topic-6"]
+	bot.renamedTopicsMu.Unlock()
+	if secondConversation {
+		t.Fatal("one conversation's rename marked another conversation")
 	}
 }
 
-func TestTelegramRenameConversationOnlyIfImplicitSkipsUnknownAndExplicit(t *testing.T) {
-	recorder := &topicTitleRecorder{}
-	bot := newTopicTitleBot(t, recorder)
-	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", true); err != nil {
-		t.Fatalf("unknown topic error = %v", err)
+func TestTelegramForcedRenameAlwaysRenames(t *testing.T) {
+	recorder := &topicRenameRecorder{}
+	bot := newTopicRenameBot(t, recorder)
+	// /pi name renames even a topic Spynel never touched automatically.
+	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Explicit", true); err != nil {
+		t.Fatal(err)
 	}
-	bot.setTopicTitle(topicTitleKey{chatID: 7, threadID: 5}, topicTitleExplicit)
-	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", true); err != nil {
-		t.Fatalf("explicit topic error = %v", err)
+	// And it renames even after Spynel already renamed the topic.
+	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Forced", true); err != nil {
+		t.Fatal(err)
 	}
-	if requests := recorder.snapshot(); len(requests) != 0 {
-		t.Fatalf("only-if-implicit renamed an unknown or explicit topic: %#v", requests)
+	if requests := recorder.snapshot(); len(requests) != 2 {
+		t.Fatalf("forced rename requests = %d, want 2", len(requests))
+	}
+	// The forced renames keep the mark, so automatic logic stays silent.
+	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Automatic again", false); err != nil {
+		t.Fatal(err)
+	}
+	if requests := recorder.snapshot(); len(requests) != 2 {
+		t.Fatalf("automatic rename ran after forced renames: %d requests", len(requests))
+	}
+}
+
+func TestTelegramAutomaticRenameSurvivesNothingAcrossRestart(t *testing.T) {
+	recorder := &topicRenameRecorder{}
+	first := newTopicRenameBot(t, recorder)
+	if err := first.RenameConversation(context.Background(), "TG-7-topic-5", "Release", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.snapshot()) != 1 {
+		t.Fatal("first process did not rename the topic")
+	}
+	// A fresh Bot stands for a process restart: the once-set is empty, so the
+	// next automatic trigger renames the topic again.
+	restarted := newTopicRenameBot(t, recorder)
+	if restarted.topicRenamed("TG-7-topic-5") {
+		t.Fatal("fresh process retained a renamed topic")
+	}
+	if err := restarted.RenameConversation(context.Background(), "TG-7-topic-5", "Release", false); err != nil {
+		t.Fatal(err)
+	}
+	if requests := recorder.snapshot(); len(requests) != 2 {
+		t.Fatalf("post-restart automatic rename requests = %d, want 2", len(requests))
+	}
+}
+
+func TestTelegramRenamedTopicSetIsBounded(t *testing.T) {
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	for index := 0; index < maxRenamedTopics; index++ {
+		bot.markTopicRenamed(fmt.Sprintf("TG-7-topic-%d", 1000+index))
+	}
+	bot.markTopicRenamed("TG-7-topic-9000")
+	bot.renamedTopicsMu.Lock()
+	size := len(bot.renamedTopics)
+	_, kept := bot.renamedTopics["TG-7-topic-9000"]
+	bot.renamedTopicsMu.Unlock()
+	if size > maxRenamedTopics || !kept {
+		t.Fatalf("bounded eviction: size=%d kept=%v", size, kept)
 	}
 }
 
 func TestTelegramRenameConversationRejectsInapplicableRoutesAndLabels(t *testing.T) {
-	recorder := &topicTitleRecorder{}
-	bot := newTopicTitleBot(t, recorder)
+	recorder := &topicRenameRecorder{}
+	bot := newTopicRenameBot(t, recorder)
 	for _, conversation := range []string{"TG-7", "TG-group--100", "TG-group--100-topic-2", "TG-not-canonical", "WA-15551234567"} {
-		err := bot.RenameConversation(context.Background(), conversation, "Release", false)
+		err := bot.RenameConversation(context.Background(), conversation, "Release", true)
 		if err == nil {
 			t.Fatalf("%s was accepted as a private Telegram topic", conversation)
 		}
@@ -193,7 +169,6 @@ func TestTelegramRenameConversationRejectsInapplicableRoutesAndLabels(t *testing
 			t.Fatalf("%s rejection did not wrap the unsupported sentinel: %v", conversation, err)
 		}
 	}
-	bot.setTopicTitle(topicTitleKey{chatID: 7, threadID: 5}, topicTitleImplicit)
 	for name, label := range map[string]string{
 		"empty":        "",
 		"whitespace":   "   ",
@@ -206,50 +181,55 @@ func TestTelegramRenameConversationRejectsInapplicableRoutesAndLabels(t *testing
 			t.Fatalf("%s label was accepted", name)
 		}
 	}
-	if requests := recorder.snapshot(); len(requests) != 0 {
+	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", strings.Repeat("a", maxTopicLabelRunes), true); err != nil {
+		t.Fatalf("boundary-length label was rejected: %v", err)
+	}
+	if requests := recorder.snapshot(); len(requests) != 1 {
 		t.Fatalf("rejected routes or labels reached the provider: %#v", requests)
 	}
 }
 
 func TestTelegramRenameConversationTreatsTopicNotModifiedAsSuccess(t *testing.T) {
-	recorder := &topicTitleRecorder{
+	recorder := &topicRenameRecorder{
 		statuses: []int{http.StatusBadRequest},
 		bodies:   []string{`{"ok":false,"error_code":400,"description":"Bad Request: TOPIC_NOT_MODIFIED"}`},
 	}
-	bot := newTopicTitleBot(t, recorder)
-	bot.setTopicTitle(topicTitleKey{chatID: 7, threadID: 5}, topicTitleImplicit)
-	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", true); err != nil {
+	bot := newTopicRenameBot(t, recorder)
+	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", false); err != nil {
 		t.Fatalf("TOPIC_NOT_MODIFIED error = %v", err)
 	}
-	if got := bot.topicTitleState(topicTitleKey{chatID: 7, threadID: 5}); got != topicTitleExplicit {
-		t.Fatalf("TOPIC_NOT_MODIFIED state = %v", got)
+	if !bot.topicRenamed("TG-7-topic-5") {
+		t.Fatal("TOPIC_NOT_MODIFIED did not mark the conversation renamed")
+	}
+	if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", false); err != nil {
+		t.Fatal(err)
+	}
+	if requests := recorder.snapshot(); len(requests) != 1 {
+		t.Fatalf("automatic rename repeated after TOPIC_NOT_MODIFIED: %d requests", len(requests))
 	}
 }
 
 func TestTelegramRenameConversationPropagatesOtherProviderErrors(t *testing.T) {
-	recorder := &topicTitleRecorder{
+	recorder := &topicRenameRecorder{
 		statuses: []int{http.StatusBadRequest},
 		bodies:   []string{`{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}`},
 	}
-	bot := newTopicTitleBot(t, recorder)
-	key := topicTitleKey{chatID: 7, threadID: 5}
-	bot.setTopicTitle(key, topicTitleImplicit)
-	err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", true)
+	bot := newTopicRenameBot(t, recorder)
+	err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", false)
 	if err == nil || !strings.Contains(err.Error(), "chat not found") {
 		t.Fatalf("unrelated provider error = %v", err)
 	}
-	if got := bot.topicTitleState(key); got != topicTitleImplicit {
-		t.Fatalf("failed rename changed the tracked state to %v", got)
+	if bot.topicRenamed("TG-7-topic-5") {
+		t.Fatal("failed rename marked the conversation renamed")
 	}
 }
 
 func TestTelegramRenameConversationReauthorizesBeforeEveryProviderCall(t *testing.T) {
 	t.Run("revoked authorization", func(t *testing.T) {
-		recorder := &topicTitleRecorder{}
-		bot := newTopicTitleBot(t, recorder)
-		bot.setTopicTitle(topicTitleKey{chatID: 7, threadID: 5}, topicTitleImplicit)
+		recorder := &topicRenameRecorder{}
+		bot := newTopicRenameBot(t, recorder)
 		bot.SetAllowedUsersSource(func() []string { return nil })
-		err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", true)
+		err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", false)
 		if err == nil || !strings.Contains(err.Error(), "authorization") {
 			t.Fatalf("revoked rename error = %v", err)
 		}
@@ -259,38 +239,42 @@ func TestTelegramRenameConversationReauthorizesBeforeEveryProviderCall(t *testin
 	})
 
 	t.Run("retry rechecks authorization", func(t *testing.T) {
-		recorder := &topicTitleRecorder{
+		recorder := &topicRenameRecorder{
 			statuses: []int{http.StatusTooManyRequests},
 			bodies:   []string{`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`},
 		}
-		bot := newTopicTitleBot(t, recorder)
-		bot.setTopicTitle(topicTitleKey{chatID: 7, threadID: 5}, topicTitleImplicit)
+		bot := newTopicRenameBot(t, recorder)
 		bot.retryWait = func(context.Context, time.Duration) error {
 			bot.SetAllowedUsersSource(func() []string { return nil })
 			return nil
 		}
-		err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", true)
+		err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", false)
 		if err == nil || !strings.Contains(err.Error(), "authorization") {
 			t.Fatalf("retry authorization error = %v", err)
 		}
 		if requests := recorder.snapshot(); len(requests) != 1 {
 			t.Fatalf("retry after revocation reached the provider %d times", len(requests))
 		}
+		if bot.topicRenamed("TG-7-topic-5") {
+			t.Fatal("failed retry marked the conversation renamed")
+		}
 	})
 
 	t.Run("bounded retry succeeds after reauthorization", func(t *testing.T) {
-		recorder := &topicTitleRecorder{
+		recorder := &topicRenameRecorder{
 			statuses: []int{http.StatusTooManyRequests},
 			bodies:   []string{`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`},
 		}
-		bot := newTopicTitleBot(t, recorder)
-		bot.setTopicTitle(topicTitleKey{chatID: 7, threadID: 5}, topicTitleImplicit)
+		bot := newTopicRenameBot(t, recorder)
 		bot.retryWait = func(context.Context, time.Duration) error { return nil }
-		if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", true); err != nil {
+		if err := bot.RenameConversation(context.Background(), "TG-7-topic-5", "Release", false); err != nil {
 			t.Fatalf("bounded retry error = %v", err)
 		}
 		if requests := recorder.snapshot(); len(requests) != 2 {
 			t.Fatalf("bounded retry requests = %d, want 2", len(requests))
+		}
+		if !bot.topicRenamed("TG-7-topic-5") {
+			t.Fatal("successful retry did not mark the conversation renamed")
 		}
 	})
 }

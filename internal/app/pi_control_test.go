@@ -101,6 +101,19 @@ func (h *piControlHarness) SetSessionName(_ context.Context, key, expectedSessio
 	return h.nameResult, nil
 }
 
+// ResetSession mirrors /clear for the fake harness: the conversation's session
+// is forgotten, so the next message creates and names a new one.
+func (h *piControlHarness) ResetSession(key string) error {
+	if err := h.serviceHarness.ResetSession(key); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	h.found = false
+	h.info = harness.SessionInfo{}
+	h.mu.Unlock()
+	return nil
+}
+
 func (h *piControlHarness) Send(_ context.Context, key, prompt string, emit core.Emit) (string, bool, error) {
 	h.mu.Lock()
 	h.prompts[key] = append(h.prompts[key], prompt)

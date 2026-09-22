@@ -171,7 +171,7 @@ func (s *Service) piSessionCommand(message core.Message, emit core.Emit) error {
 // piNameCommand assigns one explicit display name to an existing Pi session.
 // It never creates a session, is safe during an active turn, and additionally
 // renames a private Telegram topic so an explicitly named session can replace
-// an implicit topic title. A failed topic rename reports partial success and
+// an existing topic title. A failed topic rename reports partial success and
 // never rolls the provider name back.
 func (s *Service) piNameCommand(ctx context.Context, message core.Message, name string, emit core.Emit) error {
 	name = strings.TrimSpace(name)
@@ -218,7 +218,7 @@ func (s *Service) piNameCommand(ctx context.Context, message core.Message, name 
 	}
 	reply := "Pi session renamed to `" + effective + "`."
 	if route, routeErr := telegram.ParseConversation(message.Conversation); message.Channel == "telegram" && routeErr == nil && !route.IsGroup() && route.ThreadID() >= 2 && s.ConversationLabels != nil {
-		if renameErr := s.ConversationLabels.RenameConversation(ctx, message.Channel, message.Conversation, effective, false); renameErr != nil {
+		if renameErr := s.ConversationLabels.RenameConversation(ctx, message.Channel, message.Conversation, effective, true); renameErr != nil {
 			reply = "Pi session renamed to `" + effective + "`, but the Telegram topic could not be renamed: " + harness.SafeControlErrorText(renameErr)
 		} else {
 			reply = "Pi session renamed to `" + effective + "` and the Telegram topic was renamed."

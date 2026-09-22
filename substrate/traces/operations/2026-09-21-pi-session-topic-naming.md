@@ -1,6 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-21
+updated_at: 2026-09-21
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -32,7 +33,7 @@ files_edited:
   - internal/harness/process_fixture_test.go
   - internal/harness/supervisor.go
   - internal/harness/supervisor_test.go
-rationale: Record the completed automatic Pi session naming, private Telegram topic renaming, and explicit `/pi name` control together with the synchronized documentation, DOX, and compiled agent documentation pass, with the quality and security gates already passed and no release requested.
+rationale: Record the completed automatic Pi session naming, private Telegram topic renaming, and explicit `/pi name` control together with the synchronized documentation, DOX, and compiled agent documentation pass, with the quality and security gates already passed and no release requested; the follow-up at-most-once simplification replaced the tri-state implicit-title fence and resynchronized the same documentation set.
 supporting_docs:
   - ../../../docs/architecture.md
   - ../../../docs/cli.md
@@ -145,3 +146,36 @@ No release was requested for this change. It is uncommitted work on top of `13e8
 - [Pi session controls](2026-09-20-pi-session-controls.md)
 - [Pi retained prompt context](2026-09-21-pi-retained-prompt-context.md)
 - [Telegram topic conversations and bounded rich-text replies](2026-09-20-telegram-topic-rich-text.md)
+
+## Update 2026-09-21: at-most-once topic rename
+
+### Summary
+
+The tri-state title fence is gone. A first user message that creates a Pi session still derives the same bounded label and still routes the effective name to the Telegram adapter, but the automatic rename is now unconditional: the adapter suppresses only a repeat for a conversation it already renamed in the same process. `/pi name <name>` force-renames even a topic Spynel already renamed, and the stale tri-state DOX bullets were replaced by the at-most-once rule.
+
+### Technical reasoning
+
+The user asked for one simple rule: rename the topic before the user would ordinarily edit it, then let the user own the title afterwards. The tri-state tracking existed to protect an explicitly titled topic, but it also delayed the rename until a `forum_topic_created` service message arrived and turned unknown state into a permanent skip after a restart. Dropping the state removes `forum_topic_created`/`forum_topic_edited` parsing, `is_name_implicit`, the unknown/implicit/explicit enum, and the silent skip of unknown topics, and it makes the first trigger deterministic: a new thread is renamed at its first session creation instead of waiting for transport-reported state, so it is not left as "New chat".
+
+`RenameConversation` still parses the canonical route, rejects base chats, groups, malformed routes, and invalid labels before any provider call, and still routes `editForumTopic` through the authorization-checked provider path with its single bounded rate-limit retry. The only skip in the automatic path is the new bounded in-memory set: a successful rename, including the idempotent `TOPIC_NOT_MODIFIED` 400, marks the conversation, and a failed provider call leaves it unmarked.
+
+### Impact
+
+- The previous property "explicit titles are never overwritten automatically" is deliberately replaced by the user-approved at-most-once rule. The rename now happens before the user would typically edit the title, and a later user edit is not touched automatically again within the same process.
+- The application keeps the same two call sites and best-effort semantics: automatic naming routes `force=false` and `/pi name` routes `force=true`. The transport owns the at-most-once fence, and the application never sees the renamed set.
+- The `ConversationLabeler` parameter is renamed from `onlyIfImplicit` to `force` across `internal/channel` and its supervisor.
+- A restart clears the set, so the first automatic trigger after a restart can rename the topic again even after the user edited it; eviction beyond 1024 conversations can do the same for one conversation. Both are accepted edges, not defects.
+- `TOPIC_NOT_MODIFIED` still counts as success and now also marks the conversation, so an idempotent provider response does not cause a repeat within the process.
+
+### Validation
+
+- `go test -count=1 ./...` passed on the completed tree, including the locally replaced Bubble Tea module's nested tests.
+- A targeted race run on the changed packages, `./internal/channel ./internal/channel/telegram ./internal/app`, passed.
+- `go vet ./...` reported no findings.
+- `mkdir -p .tmp-bin && go build -o .tmp-bin/spynel ./cmd/spynel` built the binary.
+- `scripts/smoke.sh` passed.
+- `scripts/dev.sh dox` printed the DOX coverage result.
+- Fresh coverage: `RenameConversation` 100%, `topicRenamed` 100%, `markTopicRenamed` 88.9%, and `internal/app/session_name.go` 100%.
+- `git diff --check` reported no whitespace errors.
+- Quality gate: PASS.
+- Security gate: PASS with two minor non-blocking advisories: the bounded-set comment overstated the automatic no-repeat guarantee, and `isTopicNotModified` matches `TOPIC_NOT_MODIFIED` as a description substring rather than an exact code. The comment wording was corrected in this pass; the substring match is accepted as bounded provider tolerance.

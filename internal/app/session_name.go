@@ -56,8 +56,9 @@ func (s *Service) nameNewPiSession(ctx context.Context, message core.Message, pr
 		return
 	}
 	// The active transport decides whether this conversation has a label at
-	// all; an inapplicable route or disconnected channel is a silent no-op.
-	_ = s.ConversationLabels.RenameConversation(nameContext, message.Channel, message.Conversation, result.Name, true)
+	// all; an inapplicable route or disconnected channel is a silent no-op,
+	// and the transport suppresses any automatic repeat rename.
+	_ = s.ConversationLabels.RenameConversation(nameContext, message.Channel, message.Conversation, result.Name, false)
 }
 
 // conversationSessionLabel derives one short session label from the accepted
