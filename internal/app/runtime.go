@@ -911,6 +911,15 @@ func (r *Runtime) ClearLogsResult() (int, error) {
 // Close marks a clean boundary and flushes the current session file.
 func (r *Runtime) Close() {
 	r.closeOnce.Do(func() {
+		// Retire job-archive persistence first: the archive lock drains any
+		// in-flight workspace write and refuses every later one, so Close
+		// returning means no job-archive write can still land in the workspace.
+		r.mu.Lock()
+		archive := r.archive
+		r.mu.Unlock()
+		if archive != nil {
+			archive.close()
+		}
 		r.writerMu.Lock()
 		partial := append([]byte(nil), r.partial...)
 		partials := r.partials

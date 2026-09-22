@@ -458,6 +458,9 @@ func startTestServer(t *testing.T, state string) (*instance.Election, *Server, *
 	}
 	target := newAPIHarness()
 	service := app.New(cfg, target)
+	// Close the service before TempDir cleanup so every runtime persistence
+	// writer is quiesced before the workspace directory is removed.
+	t.Cleanup(func() { _ = service.Close() })
 	election, err := instance.New(cfg.StatePath())
 	if err != nil {
 		t.Fatal(err)

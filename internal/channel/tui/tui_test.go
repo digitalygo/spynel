@@ -1883,6 +1883,11 @@ func TestWizardTabsUseBoldLabelsAndActiveUnderline(t *testing.T) {
 }
 
 func TestHeaderShowsRuntimeStatusAndFooterOnlyShowsControls(t *testing.T) {
+	// Pin the undecorated profile these raw-view assertions render under so a
+	// color profile installed by another test cannot reorder their SGR bytes.
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	m := testModel()
 	m.width = 80
 	m.title = "Payments"
@@ -2068,6 +2073,11 @@ func TestHeaderKeepsLogoAndTitleAccent(t *testing.T) {
 }
 
 func TestRuntimeEventUpdatesHeaderCounts(t *testing.T) {
+	// Pin the undecorated profile these raw-view assertions render under so a
+	// color profile installed by another test cannot reorder their SGR bytes.
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	m := testModel()
 	m.width = 100
 	m.durableWork = core.DurableWorkCounts{Goals: 2, Tasks: 1}

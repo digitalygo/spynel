@@ -55,6 +55,11 @@ type archivedJob struct {
 
 var stableJobFallback atomic.Uint64
 
+// errJobArchiveClosed fences workspace persistence after close. A closed
+// archive must never recreate or touch the jobs directory, so shutdown and
+// workspace teardown cannot race a late job write.
+var errJobArchiveClosed = errors.New("job archive is closed")
+
 type JobArchive struct {
 	mu        sync.Mutex
 	directory string
@@ -421,9 +426,15 @@ func (a *JobArchive) finish(job Job, endedAt time.Time) error {
 	return err
 }
 
+// close waits for any in-flight workspace write, then permanently fences all
+// later ones and releases process-local job ownership. Once close returns, no
+// job-archive write is running or can start again.
 func (a *JobArchive) close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.boundary == nil {
+		a.boundary = errJobArchiveClosed
+	}
 	for stableID, record := range a.active {
 		if record.owner != nil {
 			unlockJobCounter(record.owner)
@@ -437,6 +448,9 @@ func (a *JobArchive) close() {
 }
 
 func (a *JobArchive) writeLocked(record *archivedJob) error {
+	if a.boundary != nil {
+		return a.boundary
+	}
 	if err := ensureJobArchiveDirectory(a.directory); err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -33,6 +34,14 @@ type Server struct {
 	Service     *app.Service
 	Token       string
 	subscribers atomic.Int32
+}
+
+// dispatchScope tracks the detached message-dispatch goroutines of one Serve
+// call. Streaming handlers hand application admission to that goroutine, which
+// keeps writing history and job state after the response ends, so shutdown must
+// join it before ownership is relinquished.
+type dispatchScope struct {
+	dispatch sync.WaitGroup
 }
 
 type streamEnvelope struct {
@@ -88,12 +97,15 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	// channels after election. Anchor the cleanup fence to the point when live
 	// TUI clients can actually renew, before accepting any request.
 	s.Service.FenceCleanupForLiveTUIReadmission()
+	scope := &dispatchScope{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.authorize(s.health))
 	mux.HandleFunc("GET /v1/state", s.authorize(s.state))
 	mux.HandleFunc("GET /v1/status", s.authorize(s.status))
 	mux.HandleFunc("GET /v1/initial-screen", s.authorize(s.initialScreen))
-	mux.HandleFunc("POST /v1/message", s.authorize(s.message))
+	mux.HandleFunc("POST /v1/message", s.authorize(func(response http.ResponseWriter, request *http.Request) {
+		s.message(scope, response, request)
+	}))
 	mux.HandleFunc("GET /v1/events", s.authorize(s.events))
 	mux.HandleFunc("GET /v1/conversation", s.authorize(s.conversation))
 	mux.HandleFunc("POST /v1/screen-action", s.authorize(s.screenAction))
@@ -126,6 +138,19 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		// before ownership is relinquished.
 		cancelServer()
 		shutdownServer(ctx, server)
+	}
+	// The streaming message handler returns its response while its detached
+	// application dispatch is still writing history and job state. Join those
+	// dispatches, bounded, so Serve returning is a quiesce point for this
+	// listener's application writes.
+	drained := make(chan struct{})
+	go func() {
+		scope.dispatch.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(shutdownTimeout):
 	}
 	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
 		return nil
@@ -273,7 +298,7 @@ func (s *Server) initialScreen(response http.ResponseWriter, request *http.Reque
 	writeJSON(response, http.StatusOK, screenResponse{Screen: screen})
 }
 
-func (s *Server) message(response http.ResponseWriter, request *http.Request) {
+func (s *Server) message(scope *dispatchScope, response http.ResponseWriter, request *http.Request) {
 	var message core.Message
 	if err := decodeJSON(request.Body, &message); err != nil {
 		http.Error(response, err.Error(), http.StatusBadRequest)
@@ -316,7 +341,11 @@ func (s *Server) message(response http.ResponseWriter, request *http.Request) {
 	// Drain concurrently with Handle: synchronous providers can emit more than
 	// the bounded queue before returning their admission result.
 	dispatched := make(chan error, 1)
-	go func() { dispatched <- s.Service.Handle(ctx, message, emit) }()
+	scope.dispatch.Add(1)
+	go func() {
+		defer scope.dispatch.Done()
+		dispatched <- s.Service.Handle(ctx, message, emit)
+	}()
 	encoder := json.NewEncoder(response)
 	awaitTerminal := false
 	handlerDone := false

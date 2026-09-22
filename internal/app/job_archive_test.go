@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -563,4 +564,47 @@ func TestJobArchiveClassifiesOrchestratorOriginsAndLinkage(t *testing.T) {
 			t.Errorf("%s archive = %#v, %v", test.origin, item, err)
 		}
 	}
+}
+
+func TestRuntimeCloseFencesJobArchiveWrites(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "jobs")
+	runtime := NewRuntime()
+	runtime.ConfigureJobArchive(directory)
+	id := runtime.BeginJob("session", "cli", "private", "fenced job")
+	if _, ok := runtime.Job(id); !ok {
+		t.Fatal("fenced job was not admitted")
+	}
+	runtime.Close()
+	before := jobArchiveContents(t, directory)
+	runtime.RecordJobEvent(id, core.Event{Kind: core.EventFinal, Text: "late terminal", Done: true})
+	runtime.UpdateJob(id, core.ExecutionStatus{State: "running"})
+	runtime.EndJob(id)
+	if _, err := runtime.TryBeginJobWithDetails("late", "cli", "private", "late job", JobDetails{}); err == nil {
+		t.Fatal("job admission persisted after runtime close")
+	}
+	after := jobArchiveContents(t, directory)
+	if !maps.Equal(before, after) {
+		keys := make([]string, 0, len(after))
+		for name := range after {
+			keys = append(keys, name)
+		}
+		t.Fatalf("job archive changed after runtime close: %v", keys)
+	}
+}
+
+func jobArchiveContents(t *testing.T, directory string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[entry.Name()] = string(data)
+	}
+	return contents
 }
