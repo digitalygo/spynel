@@ -1,7 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-22
-updated_at: 2026-09-22
+updated_at: 2026-09-23
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -58,6 +58,7 @@ supporting_docs:
   - ../../../internal/config/AGENTS.md
   - https://elevenlabs.io/pricing
   - https://github.com/digitalygo/spynel/releases/tag/v1.5.0
+  - https://github.com/digitalygo/spynel/releases/tag/v1.5.1
 ---
 
 # ElevenLabs speech transcription
@@ -262,3 +263,44 @@ Documentation pass checks run for this update on the completed tree:
 - `go test -count=1 ./internal/config ./internal/media ./internal/app ./internal/agentdocs` passed.
 - `git diff --check` reported no whitespace errors.
 - A structural Markdown scan of every added line across the changed files confirmed one H1 per file, uninterrupted heading progression, no em dash, no trailing whitespace, and a single trailing newline.
+
+## Update 2026-09-23: v1.5.1 publication
+
+### Summary
+
+v1.5.1 is published as a patch release carrying the stored ElevenLabs key with CLI configuration. The stable [GitHub release v1.5.1](https://github.com/digitalygo/spynel/releases/tag/v1.5.1) (annotated tag, target commit `84e1f817cab58ea023f0f87b944a1308a7101af4`) ships four native archives plus `checksums.txt`, and `@digitalygo/spynel@1.5.1` is the npm `latest` with SLSA provenance v1 from Trusted Publishing. The user requested the stored-key work as a patch because the provider feature shipped in v1.5.0, and this release adds `spynel config set`/`spynel config unset`, the masked secret, and stored-first resolution to that line. The live npm-managed home service was updated from 1.5.0 to 1.5.1 through the official `spynel update` path, and the in-place re-exec preserved the key-bearing environment, so `ELEVENLABS_API_KEY` remains PRESENT as the sole key source while the stored setting stays unset.
+
+### Technical reasoning
+
+The patch scope is deliberate. The stored key completes the operational story for detached services, whose generated autostart units do not inherit interactive shell exports, and it was requested as a patch so the v1.5.0 provider line receives it without a new minor release. Nothing else changed in the release, so every v1.5.0 boundary and the sentinel-only Parakeet fallback carry over unchanged.
+
+Publication followed the same two-step validation as v1.5.0. A manual validation run passed verify and all four native builds with publish skipped, then the release run repeated the checks and performed the publish, so the published artifacts come from the commit that already passed the dry run. Local host package validation added an independent third check: the extracted binary reports 1.5.1 and the archive digest matches the published checksum. SLSA provenance v1 through Trusted Publishing ties the npm artifact to the GitHub Actions OIDC identity.
+
+The upgrade preserved the process environment because the in-place re-exec keeps the environment of the replaced process. `ELEVENLABS_API_KEY` remains PRESENT in the restarted service and the stored `speech.elevenlabs_api_key` stays unset, so the environment is still the sole key source and the stored-first precedence has not been exercised live yet. The live speech settings are `provider=elevenlabs`, `language=auto`, and `model_id=scribe_v2`.
+
+One verification nuance is worth recording. An intermediate check reported `speech.language=en` and the stored key as not set because it read the repository workspace configuration instead of `/home/luca/.spynel/config.yaml`. The home configuration is correct (`language: auto`, stored key unset, environment-provided key in use) and its file was last written well before the release, so the odd reading was a target mix-up rather than configuration drift.
+
+### Impact
+
+- The native archives and npm `latest` now deliver v1.5.1 with the stored-key support, and v1.5.0 is superseded.
+- The live home service is healthy on 1.5.1: Telegram and Pi are connected and idle, settings are inherited, `reviews` stays `never`, and the updater reports the current version.
+- The stored-first precedence path remains unexercised in the live service because the stored value stays unset; the environment variable still provides the key, and a stored key would win if one is set later.
+- Non-blocking observations only: CI carries Node 20 `actions/upload-artifact` deprecation annotations, and the npm install path prints an informational `allowScripts` warning on postinstall. Neither affects the published artifacts or the live service.
+
+### Validation
+
+Publication and deployment evidence gathered on 2026-09-23:
+
+- Manual validation run 35876976480 passed verify and all four native builds with publish skipped.
+- Release run 35878168313 passed verify, all four native builds, and publish.
+- Local host package validation passed: `spynel_1.5.1_linux_amd64.tar.gz` with sha256 `63a803c471c7d812c5840c120562157f76ebbb804c2a6e29f8ce656c99f64f8d`, and the extracted binary reports version 1.5.1.
+- The stable [v1.5.1 release](https://github.com/digitalygo/spynel/releases/tag/v1.5.1) carries the four native archives plus `checksums.txt`; `@digitalygo/spynel@1.5.1` is the npm `latest` with SLSA provenance v1 from Trusted Publishing, visible after a few minutes of registry propagation.
+- The live npm-managed home service runs 1.5.1 after the official `spynel update`; the Linuxbrew npmrc quirk was handled with a temporary owner-write and a `trap` restore, and the npmrc hash was unchanged. Telegram and Pi are connected and idle, settings are inherited, `reviews` is `never`, and the updater is current at 1.5.1.
+- The restarted service process still carries `ELEVENLABS_API_KEY` as PRESENT, the stored `speech.elevenlabs_api_key` is unset, and `speech.provider=elevenlabs`, `speech.language=auto`, and `speech.elevenlabs_model_id=scribe_v2`.
+- The intermediate `speech.language=en`/not-set reading came from querying the repository workspace configuration instead of `/home/luca/.spynel/config.yaml`; the home configuration is correct (`language: auto`, stored key unset, environment-provided key in use) and its file predates the release.
+
+Checks for this record's update on the completed tree:
+
+- `scripts/dev.sh dox` reported DOX coverage valid for 51 tracked directories.
+- `git diff --check` reported no whitespace errors.
+- A structural Markdown scan of every added line confirmed one H1 in this file, uninterrupted heading progression, no em dash, no trailing whitespace, and a single trailing newline.
