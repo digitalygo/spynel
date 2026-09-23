@@ -1745,3 +1745,260 @@ func TestTelegramAttachmentBoundaryReauthorizesRoute(t *testing.T) {
 		t.Fatalf("revoked attachment route contacted Telegram: %d calls", providerCalls)
 	}
 }
+
+// telegramMessageCapture collects outbound sendMessage payloads in order.
+type telegramMessageCapture struct {
+	mu       sync.Mutex
+	payloads []map[string]any
+}
+
+func (c *telegramMessageCapture) add(payload map[string]any) {
+	c.mu.Lock()
+	c.payloads = append(c.payloads, payload)
+	c.mu.Unlock()
+}
+
+func (c *telegramMessageCapture) snapshot() []map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]map[string]any(nil), c.payloads...)
+}
+
+// testTelegramMediaServer serves attachment download plus outbound delivery for
+// one stored audio file. failSend makes every sendMessage attempt fail.
+func testTelegramMediaServer(t *testing.T, filePath string, failSend bool, capture *telegramMessageCapture) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/bottest/getFile":
+			_, _ = writer.Write([]byte(`{"ok":true,"result":{"file_path":"` + filePath + `"}}`))
+		case "/file/bottest/" + filePath:
+			_, _ = writer.Write([]byte("voice bytes"))
+		case "/bottest/sendChatAction":
+			_, _ = writer.Write([]byte(`{"ok":true,"result":true}`))
+		case "/bottest/sendMessage":
+			var payload map[string]any
+			_ = json.NewDecoder(request.Body).Decode(&payload)
+			if capture != nil {
+				capture.add(payload)
+			}
+			if failSend {
+				writer.WriteHeader(http.StatusInternalServerError)
+				_, _ = writer.Write([]byte(`{"ok":false,"description":"delivery failed"}`))
+				return
+			}
+			_, _ = writer.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+}
+
+// revokingTranscriber revokes runtime authorization mid-transcription so the
+// echo path must fail closed without a provider call.
+type revokingTranscriber struct {
+	bot  *Bot
+	text string
+}
+
+func (r revokingTranscriber) Transcribe(context.Context, media.TranscriptionRequest) (string, error) {
+	r.bot.RevokeRuntimeAuthorization()
+	return r.text, nil
+}
+
+func TestTelegramTranscriptEchoPrecedesDispatch(t *testing.T) {
+	voice := func(threadID int64) *telegramMessage {
+		return &telegramMessage{
+			MessageID: 41, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"},
+			MessageThreadID: threadID, Date: 10,
+			Voice: &telegramMedia{FileID: "voice-id", FileUniqueID: "vunique", Duration: 9},
+		}
+	}
+	tests := []struct {
+		name       string
+		message    *telegramMessage
+		filePath   string
+		transcript string
+		threadID   float64
+	}{
+		{name: "voice note", message: voice(0), filePath: "voice/vunique.ogg", transcript: "  spoken words  "},
+		{name: "voice note topic", message: voice(5), filePath: "voice/vunique.ogg", transcript: "spoken words", threadID: 5},
+		{name: "audio file", message: &telegramMessage{
+			MessageID: 42, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"}, Date: 10,
+			Audio: &telegramMedia{FileID: "audio-id", FileUniqueID: "aunique", FileName: "song.mp3", Duration: 7},
+		}, filePath: "audio/aunique.mp3", transcript: "song words"},
+		{name: "markdown stays literal", message: voice(0), filePath: "voice/vunique.ogg", transcript: "**bold** _under_ `code` <tag> & more"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capture := &telegramMessageCapture{}
+			server := testTelegramMediaServer(t, test.filePath, false, capture)
+			defer server.Close()
+			bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+			bot.baseURL = server.URL
+			bot.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "attachments"), MaxBytes: 1024}, &fixedTranscriber{text: test.transcript})
+			bot.SetTranscriptEcho(true)
+			echoesBeforeDispatch := -1
+			var dispatched core.Message
+			bot.handle(context.Background(), func(_ context.Context, message core.Message, _ core.Emit) error {
+				echoesBeforeDispatch = len(capture.snapshot())
+				dispatched = message
+				return nil
+			}, test.message)
+			want := media.TranscriptionGeneratedMarker(test.transcript)
+			if echoesBeforeDispatch != 1 {
+				t.Fatalf("echoes before dispatch = %d, want 1", echoesBeforeDispatch)
+			}
+			if !strings.HasSuffix(dispatched.Text, want) {
+				t.Fatalf("dispatched text = %q, want suffix %q", dispatched.Text, want)
+			}
+			payloads := capture.snapshot()
+			if len(payloads) != 1 {
+				t.Fatalf("sent messages = %d, want only the echo", len(payloads))
+			}
+			echo := payloads[0]
+			if echo["chat_id"] != "7" || echo["parse_mode"] != "HTML" {
+				t.Fatalf("echo payload = %#v", echo)
+			}
+			if visible := markdownfmt.TelegramChunkPlainText(echo["text"].(string)); visible != want {
+				t.Fatalf("echo visible text = %q, want %q", visible, want)
+			}
+			reply, ok := echo["reply_parameters"].(map[string]any)
+			if !ok || reply["message_id"] != float64(test.message.MessageID) {
+				t.Fatalf("echo reply = %#v", echo["reply_parameters"])
+			}
+			if test.threadID != 0 {
+				if echo["message_thread_id"] != test.threadID {
+					t.Fatalf("echo thread = %#v, want %v", echo["message_thread_id"], test.threadID)
+				}
+			} else if _, hasThread := echo["message_thread_id"]; hasThread {
+				t.Fatalf("base conversation echo carried a thread id: %#v", echo)
+			}
+		})
+	}
+}
+
+func TestTelegramTranscriptEchoDisabledSendsNoEcho(t *testing.T) {
+	capture := &telegramMessageCapture{}
+	server := testTelegramMediaServer(t, "voice/vunique.ogg", false, capture)
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	bot.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "attachments"), MaxBytes: 1024}, &fixedTranscriber{text: "spoken words"})
+	bot.SetTranscriptEcho(false)
+	echoesBeforeDispatch := -1
+	bot.handle(context.Background(), func(_ context.Context, message core.Message, _ core.Emit) error {
+		echoesBeforeDispatch = len(capture.snapshot())
+		if !strings.HasSuffix(message.Text, media.TranscriptionGeneratedMarker("spoken words")) {
+			t.Fatalf("dispatched text = %q", message.Text)
+		}
+		return nil
+	}, &telegramMessage{MessageID: 41, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"}, Date: 10, Voice: &telegramMedia{FileID: "voice-id", FileUniqueID: "vunique", Duration: 9}})
+	if echoesBeforeDispatch != 0 || len(capture.snapshot()) != 0 {
+		t.Fatalf("disabled echo sent %d messages before dispatch, %d total", echoesBeforeDispatch, len(capture.snapshot()))
+	}
+}
+
+func TestTelegramTranscriptEchoSkipsFailedOrDisabledTranscription(t *testing.T) {
+	tests := []struct {
+		name        string
+		transcriber media.Transcriber
+		suffix      string
+	}{
+		{name: "disabled backend", transcriber: nil, suffix: "[Speech transcription is disabled; inspect the attached audio manually]"},
+		{name: "failed transcription", transcriber: failingTranscriber{err: errors.New("boom")}, suffix: "[Speech transcription failed; inspect the attached audio manually: boom]"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capture := &telegramMessageCapture{}
+			server := testTelegramMediaServer(t, "voice/vunique.ogg", false, capture)
+			defer server.Close()
+			bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+			bot.baseURL = server.URL
+			bot.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "attachments"), MaxBytes: 1024}, test.transcriber)
+			bot.SetTranscriptEcho(true)
+			echoesBeforeDispatch := -1
+			bot.handle(context.Background(), func(_ context.Context, message core.Message, _ core.Emit) error {
+				echoesBeforeDispatch = len(capture.snapshot())
+				if !strings.HasSuffix(message.Text, test.suffix) {
+					t.Fatalf("dispatched text = %q, want suffix %q", message.Text, test.suffix)
+				}
+				return nil
+			}, &telegramMessage{MessageID: 41, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"}, Date: 10, Voice: &telegramMedia{FileID: "voice-id", FileUniqueID: "vunique", Duration: 9}})
+			if echoesBeforeDispatch != 0 || len(capture.snapshot()) != 0 {
+				t.Fatalf("echo sent for absent transcription: %d before dispatch, %d total", echoesBeforeDispatch, len(capture.snapshot()))
+			}
+		})
+	}
+}
+
+func TestTelegramTranscriptEchoFailureIsNonFatalAndUnlogged(t *testing.T) {
+	capture := &telegramMessageCapture{}
+	server := testTelegramMediaServer(t, "voice/vunique.ogg", true, capture)
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	var logs strings.Builder
+	bot.SetLogWriter(&logs)
+	bot.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "attachments"), MaxBytes: 1024}, &fixedTranscriber{text: "secret spoken words"})
+	bot.SetTranscriptEcho(true)
+	dispatched := false
+	bot.handle(context.Background(), func(_ context.Context, message core.Message, _ core.Emit) error {
+		dispatched = true
+		if !strings.HasSuffix(message.Text, media.TranscriptionGeneratedMarker("secret spoken words")) {
+			t.Fatalf("dispatched text = %q", message.Text)
+		}
+		return nil
+	}, &telegramMessage{MessageID: 41, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"}, Date: 10, Voice: &telegramMedia{FileID: "voice-id", FileUniqueID: "vunique", Duration: 9}})
+	if !dispatched {
+		t.Fatal("echo delivery failure stopped message processing")
+	}
+	if attempts := capture.snapshot(); len(attempts) != 1 {
+		t.Fatalf("echo attempts = %d, want 1", len(attempts))
+	}
+	if strings.Contains(logs.String(), "spoken words") {
+		t.Fatalf("transcript content reached logs: %q", logs.String())
+	}
+}
+
+func TestTelegramTranscriptEchoRespectsAuthorizationRevocation(t *testing.T) {
+	capture := &telegramMessageCapture{}
+	server := testTelegramMediaServer(t, "voice/vunique.ogg", false, capture)
+	defer server.Close()
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	bot.baseURL = server.URL
+	bot.SetMedia(&media.Store{Directory: filepath.Join(t.TempDir(), "attachments"), MaxBytes: 1024}, revokingTranscriber{bot: bot, text: "secret spoken words"})
+	bot.SetTranscriptEcho(true)
+	handled := false
+	bot.handle(context.Background(), func(context.Context, core.Message, core.Emit) error {
+		handled = true
+		return nil
+	}, &telegramMessage{MessageID: 41, From: telegramUser{ID: 7}, Chat: telegramChat{ID: 7, Type: "private"}, Date: 10, Voice: &telegramMedia{FileID: "voice-id", FileUniqueID: "vunique", Duration: 9}})
+	if handled {
+		t.Fatal("revoked turn was dispatched to the handler")
+	}
+	if payloads := capture.snapshot(); len(payloads) != 0 {
+		t.Fatalf("revoked echo contacted the provider: %#v", payloads)
+	}
+}
+
+func TestTelegramPlainEchoSendRequiresLiveAuthorization(t *testing.T) {
+	bot := New(config.Telegram{AllowedUsers: []string{"7"}}, "test")
+	providerCalls := 0
+	bot.client.Transport = telegramRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalls++
+		return nil, errors.New("unexpected provider call")
+	})
+	route, err := ParseConversation("TG-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bot.RevokeRuntimeAuthorization()
+	if err := bot.sendPlain(context.Background(), route, media.TranscriptionGeneratedMarker("secret words"), 41); err == nil {
+		t.Fatal("revoked echo send succeeded")
+	}
+	if providerCalls != 0 {
+		t.Fatalf("revoked echo contacted Telegram: %d calls", providerCalls)
+	}
+}

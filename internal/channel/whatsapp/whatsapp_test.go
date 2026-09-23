@@ -1312,3 +1312,248 @@ func waitWhatsAppClosed(t *testing.T, done <-chan struct{}, description string) 
 		t.Fatalf("timed out waiting for %s", description)
 	}
 }
+
+func TestWhatsAppTranscriptEchoPrecedesDispatch(t *testing.T) {
+	for _, ptt := range []bool{true, false} {
+		t.Run(fmt.Sprintf("ptt=%t", ptt), func(t *testing.T) {
+			root := t.TempDir()
+			client := New(config.WhatsApp{AllowedNumbers: []string{"15551234567"}}, filepath.Join(root, "whatsapp.db"))
+			chat := types.NewJID("15551234567", types.DefaultUserServer)
+			var mu sync.Mutex
+			type echoDelivery struct {
+				chat types.JID
+				text string
+			}
+			var sent []echoDelivery
+			client.deliver = func(_ context.Context, chat types.JID, message *waE2E.Message) (whatsmeow.SendResponse, error) {
+				mu.Lock()
+				sent = append(sent, echoDelivery{chat: chat, text: message.GetConversation()})
+				mu.Unlock()
+				return whatsmeow.SendResponse{ID: types.MessageID("sent")}, nil
+			}
+			client.presence = func(context.Context, types.JID, types.ChatPresence, types.ChatPresenceMedia) error { return nil }
+			client.SetMedia(&media.Store{Directory: filepath.Join(root, "attachments"), MaxBytes: 1024}, &whatsappTranscriber{text: "  spoken words  "})
+			client.SetTranscriptEcho(true)
+			client.download = func(_ context.Context, _ whatsmeow.DownloadableMessage, file *os.File) error {
+				_, err := file.WriteString("voice bytes")
+				return err
+			}
+			echoesBeforeDispatch := -1
+			dispatched := make(chan core.Message, 1)
+			client.handler = func(_ context.Context, message core.Message, _ core.Emit) error {
+				mu.Lock()
+				echoesBeforeDispatch = len(sent)
+				mu.Unlock()
+				dispatched <- message
+				return nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			client.ctx = ctx
+			go client.messageWorker(ctx)
+			client.incoming <- incomingMessage{
+				received: time.Unix(10, 0), chat: chat, sender: "15557654321", id: "message-id",
+				message: &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+					Mimetype: proto.String("audio/ogg"), FileLength: proto.Uint64(11), PTT: proto.Bool(ptt), Seconds: proto.Uint32(9), DirectPath: proto.String("/media"),
+				}},
+			}
+			var message core.Message
+			select {
+			case message = <-dispatched:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for WhatsApp dispatch")
+			}
+			want := media.TranscriptionGeneratedMarker("spoken words")
+			mu.Lock()
+			defer mu.Unlock()
+			if echoesBeforeDispatch != 1 {
+				t.Fatalf("echoes before dispatch = %d, want 1", echoesBeforeDispatch)
+			}
+			if len(sent) != 1 || sent[0].text != want {
+				t.Fatalf("echoed messages = %#v, want %q", sent, want)
+			}
+			if sent[0].chat != chat {
+				t.Fatalf("echo chat = %v, want %v", sent[0].chat, chat)
+			}
+			if !strings.HasSuffix(message.Text, want) {
+				t.Fatalf("dispatched text = %q", message.Text)
+			}
+		})
+	}
+}
+
+func TestWhatsAppTranscriptEchoRequiresSuccessfulTranscription(t *testing.T) {
+	voice := func() *waE2E.Message {
+		return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+			Mimetype: proto.String("audio/ogg"), FileLength: proto.Uint64(11), PTT: proto.Bool(true), Seconds: proto.Uint32(9), DirectPath: proto.String("/media"),
+		}}
+	}
+	tests := []struct {
+		name        string
+		transcriber media.Transcriber
+		echoEnabled bool
+		wantEcho    bool
+		wantSuffix  string
+	}{
+		{name: "disabled backend", transcriber: nil, echoEnabled: true, wantSuffix: "[Speech transcription is disabled; inspect the attached audio manually]"},
+		{name: "failed transcription", transcriber: failingWhatsAppTranscriber{err: errors.New("boom")}, echoEnabled: true, wantSuffix: "[Speech transcription failed; inspect the attached audio manually: boom]"},
+		{name: "successful with echo disabled", transcriber: &whatsappTranscriber{text: "spoken words"}, echoEnabled: false, wantSuffix: media.TranscriptionGeneratedMarker("spoken words")},
+		{name: "successful with echo enabled", transcriber: &whatsappTranscriber{text: "  spoken words  "}, echoEnabled: true, wantEcho: true, wantSuffix: media.TranscriptionGeneratedMarker("spoken words")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			client := New(config.WhatsApp{AllowedNumbers: []string{"15551234567"}}, filepath.Join(root, "whatsapp.db"))
+			client.SetMedia(&media.Store{Directory: filepath.Join(root, "attachments"), MaxBytes: 1024}, test.transcriber)
+			client.SetTranscriptEcho(test.echoEnabled)
+			client.download = func(_ context.Context, _ whatsmeow.DownloadableMessage, file *os.File) error {
+				_, err := file.WriteString("voice bytes")
+				return err
+			}
+			text, echoes, err := client.prepareMessageAndEchoes(context.Background(), incomingMessage{id: "message-id", message: voice()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasSuffix(text, test.wantSuffix) {
+				t.Fatalf("prepared text = %q, want suffix %q", text, test.wantSuffix)
+			}
+			if test.wantEcho {
+				if len(echoes) != 1 || echoes[0] != media.TranscriptionGeneratedMarker("spoken words") {
+					t.Fatalf("echoes = %#v", echoes)
+				}
+			} else if len(echoes) != 0 {
+				t.Fatalf("unexpected echoes = %#v", echoes)
+			}
+		})
+	}
+}
+
+func TestWhatsAppTranscriptEchoFailureIsNonFatalAndUnlogged(t *testing.T) {
+	root := t.TempDir()
+	client := New(config.WhatsApp{AllowedNumbers: []string{"15551234567"}}, filepath.Join(root, "whatsapp.db"))
+	var logs strings.Builder
+	client.SetLogWriter(&logs)
+	var mu sync.Mutex
+	attempts := 0
+	client.deliver = func(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		return whatsmeow.SendResponse{}, errors.New("provider unavailable")
+	}
+	client.presence = func(context.Context, types.JID, types.ChatPresence, types.ChatPresenceMedia) error { return nil }
+	client.SetMedia(&media.Store{Directory: filepath.Join(root, "attachments"), MaxBytes: 1024}, &whatsappTranscriber{text: "secret spoken words"})
+	client.SetTranscriptEcho(true)
+	client.download = func(_ context.Context, _ whatsmeow.DownloadableMessage, file *os.File) error {
+		_, err := file.WriteString("voice bytes")
+		return err
+	}
+	dispatched := make(chan core.Message, 1)
+	client.handler = func(_ context.Context, message core.Message, _ core.Emit) error {
+		dispatched <- message
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.ctx = ctx
+	go client.messageWorker(ctx)
+	client.incoming <- incomingMessage{
+		received: time.Unix(10, 0), chat: types.NewJID("15551234567", types.DefaultUserServer), sender: "15557654321", id: "message-id",
+		message: &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+			Mimetype: proto.String("audio/ogg"), FileLength: proto.Uint64(11), PTT: proto.Bool(true), Seconds: proto.Uint32(9), DirectPath: proto.String("/media"),
+		}},
+	}
+	var message core.Message
+	select {
+	case message = <-dispatched:
+	case <-time.After(time.Second):
+		t.Fatal("echo delivery failure stopped message processing")
+	}
+	if !strings.HasSuffix(message.Text, media.TranscriptionGeneratedMarker("secret spoken words")) {
+		t.Fatalf("dispatched text = %q", message.Text)
+	}
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("echo attempts = %d, want 1", got)
+	}
+	if strings.Contains(logs.String(), "secret spoken words") {
+		t.Fatalf("transcript content reached logs: %q", logs.String())
+	}
+}
+
+func TestWhatsAppTranscriptEchoKeepsMarkdownSignificantCharacters(t *testing.T) {
+	root := t.TempDir()
+	client := New(config.WhatsApp{AllowedNumbers: []string{"15551234567"}}, filepath.Join(root, "whatsapp.db"))
+	chat := types.NewJID("15551234567", types.DefaultUserServer)
+	var mu sync.Mutex
+	type echoDelivery struct {
+		chat types.JID
+		text string
+	}
+	var sent []echoDelivery
+	client.deliver = func(_ context.Context, chat types.JID, message *waE2E.Message) (whatsmeow.SendResponse, error) {
+		mu.Lock()
+		sent = append(sent, echoDelivery{chat: chat, text: message.GetConversation()})
+		mu.Unlock()
+		return whatsmeow.SendResponse{ID: types.MessageID("sent")}, nil
+	}
+	client.presence = func(context.Context, types.JID, types.ChatPresence, types.ChatPresenceMedia) error { return nil }
+	const transcript = "**bold** _under_ `code`"
+	client.SetMedia(&media.Store{Directory: filepath.Join(root, "attachments"), MaxBytes: 1024}, &whatsappTranscriber{text: transcript})
+	client.SetTranscriptEcho(true)
+	client.download = func(_ context.Context, _ whatsmeow.DownloadableMessage, file *os.File) error {
+		_, err := file.WriteString("voice bytes")
+		return err
+	}
+	dispatched := make(chan core.Message, 1)
+	client.handler = func(_ context.Context, message core.Message, _ core.Emit) error {
+		dispatched <- message
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.ctx = ctx
+	go client.messageWorker(ctx)
+	client.incoming <- incomingMessage{
+		received: time.Unix(10, 0), chat: chat, sender: "15557654321", id: "message-id",
+		message: &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+			Mimetype: proto.String("audio/ogg"), FileLength: proto.Uint64(11), PTT: proto.Bool(true), Seconds: proto.Uint32(9), DirectPath: proto.String("/media"),
+		}},
+	}
+	var message core.Message
+	select {
+	case message = <-dispatched:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WhatsApp dispatch")
+	}
+	want := media.TranscriptionGeneratedMarker(transcript)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 || sent[0].text != want {
+		t.Fatalf("echoed messages = %#v, want exactly %q", sent, want)
+	}
+	if sent[0].chat != chat {
+		t.Fatalf("echo chat = %v, want %v", sent[0].chat, chat)
+	}
+	if !strings.HasSuffix(message.Text, want) {
+		t.Fatalf("dispatched text = %q", message.Text)
+	}
+}
+
+func TestWhatsAppPlainEchoSendRequiresLiveAuthorization(t *testing.T) {
+	client := New(config.WhatsApp{AllowedNumbers: []string{"15551234567"}}, filepath.Join(t.TempDir(), "whatsapp.db"))
+	providerCalls := 0
+	client.deliver = func(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error) {
+		providerCalls++
+		return whatsmeow.SendResponse{}, errors.New("unexpected provider call")
+	}
+	client.RevokeRuntimeAuthorization()
+	if err := client.sendPlain(context.Background(), types.NewJID("15551234567", types.DefaultUserServer), media.TranscriptionGeneratedMarker("secret words")); err == nil {
+		t.Fatal("revoked echo send succeeded")
+	}
+	if providerCalls != 0 {
+		t.Fatalf("revoked echo contacted WhatsApp: %d calls", providerCalls)
+	}
+}

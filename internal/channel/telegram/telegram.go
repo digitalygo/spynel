@@ -38,6 +38,7 @@ type Bot struct {
 	notice            channel.NoticeReporter
 	store             *media.Store
 	speech            media.Transcriber
+	transcriptEcho    bool
 	me                telegramUser
 	activity          *channel.ActivityIndicator[Route]
 	activityMu        sync.Mutex
@@ -102,6 +103,10 @@ func (b *Bot) SetMedia(store *media.Store, speech media.Transcriber) {
 	b.store = store
 	b.speech = speech
 }
+
+// SetTranscriptEcho controls whether a successful voice or audio
+// transcription is echoed back to the chat before the message is dispatched.
+func (b *Bot) SetTranscriptEcho(enabled bool) { b.transcriptEcho = enabled }
 
 // SetAllowedUsersSource installs the live configuration resolver used at
 // startup and immediately before every inbound and outbound provider action.
@@ -497,11 +502,17 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 	if !strings.HasPrefix(rawText, "/") {
 		setActivity(true)
 	}
-	text, err := b.messageText(ctx, message)
+	text, echoes, err := b.prepareMessage(ctx, message)
 	if err != nil {
 		_ = b.send(context.Background(), route, channel.ErrorResponse("Spynel attachment error: "+err.Error()), message.MessageID)
 		setActivity(false)
 		return
+	}
+	// Echo each generated transcript back to the chat before dispatch so the
+	// user can spot bad terms while the agent is still working. A failed echo
+	// is non-fatal, never affects the turn, and never logs transcript content.
+	for _, echo := range echoes {
+		_ = b.sendPlain(ctx, route, echo, message.MessageID)
 	}
 	if b.config.NotifyMessages && b.notice != nil {
 		if err := b.requireRuntimeAuthorization(); err != nil {
@@ -680,15 +691,28 @@ func (b *Bot) welcome(ctx context.Context, message *telegramMessage) {
 	}
 }
 
+// messageText returns the agent-facing text for one inbound message. Use
+// prepareMessage when the generated transcripts must also be echoed.
 func (b *Bot) messageText(ctx context.Context, message *telegramMessage) (string, error) {
+	text, _, err := b.prepareMessage(ctx, message)
+	return text, err
+}
+
+// prepareMessage downloads and transcribes attachments. It returns the
+// agent-facing text plus, in order, the generated transcripts to echo back to
+// the chat before dispatch. Echoes exist only for successful transcriptions
+// while transcript echo is enabled; disabled or failed transcription never
+// produces one.
+func (b *Bot) prepareMessage(ctx context.Context, message *telegramMessage) (string, []string, error) {
 	if err := b.requireRuntimeAuthorization(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	parts := []string{firstNonempty(message.Text, message.Caption)}
+	var echoes []string
 	for _, file := range message.files() {
 		attachment, err := b.download(ctx, file)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		parts = append(parts, attachment.Token())
 		if file.Speech && b.speech == nil {
@@ -700,10 +724,14 @@ func (b *Bot) messageText(ctx context.Context, message *telegramMessage) (string
 				parts = append(parts, media.TranscriptionFailedMarker(err))
 				continue
 			}
-			parts = append(parts, media.TranscriptionGeneratedMarker(transcript))
+			generated := media.TranscriptionGeneratedMarker(transcript)
+			parts = append(parts, generated)
+			if b.transcriptEcho {
+				echoes = append(echoes, generated)
+			}
 		}
 	}
-	return joinNonempty(parts), nil
+	return joinNonempty(parts), echoes, nil
 }
 
 func (b *Bot) download(ctx context.Context, file telegramFile) (media.Attachment, error) {
@@ -827,6 +855,19 @@ func (b *Bot) send(ctx context.Context, route Route, text string, replyTo int64)
 			return err
 		}
 		// Reply parameters anchor only the first delivered text chunk.
+		replyTo = 0
+	}
+	return nil
+}
+
+// sendPlain delivers literal user content without Markdown interpretation.
+// Echoed transcripts are user content, so their characters must render
+// exactly as spoken instead of becoming formatting.
+func (b *Bot) sendPlain(ctx context.Context, route Route, text string, replyTo int64) error {
+	for _, chunk := range markdownfmt.TelegramPlainChunks(text) {
+		if err := b.sendChunk(ctx, route, chunk, replyTo); err != nil {
+			return err
+		}
 		replyTo = 0
 	}
 	return nil

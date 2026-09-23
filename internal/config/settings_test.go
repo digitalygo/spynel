@@ -156,6 +156,39 @@ func TestSpeechProviderSettingsAreLiveValidatedAndNotSecret(t *testing.T) {
 	}
 }
 
+func TestTranscriptEchoSettingIsLiveDefaultOnAndTogglable(t *testing.T) {
+	cfg := Default()
+	if !cfg.Speech.TranscriptEcho {
+		t.Fatal("speech.transcript_echo should default on")
+	}
+	setting, ok := SettingByKey(cfg, "speech.transcript_echo")
+	if !ok || setting.Restart || !setting.Advanced || setting.Section != "config" || setting.Value != "on" {
+		t.Fatalf("speech.transcript_echo = %#v, present %t", setting, ok)
+	}
+	if strings.Join(setting.Choices, ",") != "on,off" {
+		t.Fatalf("speech transcript echo choices = %#v", setting.Choices)
+	}
+	updated, err := SetSetting(&cfg, "speech.transcript_echo", "OFF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Speech.TranscriptEcho || updated.Value != "off" {
+		t.Fatalf("transcript echo after disable = %t, %q", cfg.Speech.TranscriptEcho, updated.Value)
+	}
+	if _, err := SetSetting(&cfg, "speech.transcript_echo", "maybe"); err == nil {
+		t.Fatal("invalid transcript echo value was accepted")
+	}
+	if cfg.Speech.TranscriptEcho {
+		t.Fatal("failed transcript echo setting changed the configuration")
+	}
+	if _, err := SetSetting(&cfg, "speech.transcript_echo", "on"); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Speech.TranscriptEcho {
+		t.Fatal("transcript echo did not re-enable")
+	}
+}
+
 func TestStoredElevenLabsAPIKeyIsASecretAdvancedSetting(t *testing.T) {
 	cfg := Default()
 	setting, ok := SettingByKey(cfg, "speech.elevenlabs_api_key")

@@ -76,6 +76,7 @@ func Settings(cfg Config) []Setting {
 		{Key: "channels.whatsapp.allow_groups", Section: "whatsapp", Description: "Respond in groups when supported", Value: formatBool(cfg.Channels.WhatsApp.AllowGroups), Choices: []string{"on", "off"}, Advanced: true},
 		{Key: "channels.whatsapp.poll_interval_seconds", Section: "whatsapp", Description: "Connection health-check interval", Value: strconv.Itoa(cfg.Channels.WhatsApp.PollIntervalSec), Advanced: true},
 		{Key: "speech.enabled", Section: "config", Description: "Transcribe incoming voice and audio messages", Value: formatBool(cfg.Speech.Enabled), Choices: []string{"on", "off"}, Advanced: true},
+		{Key: "speech.transcript_echo", Section: "config", Description: "Echo the generated transcript back to the chat before the agent acts; applies to Telegram and WhatsApp voice notes and audio files; disable to send transcripts only to the agent", Value: formatBool(cfg.Speech.TranscriptEcho), Choices: []string{"on", "off"}, Advanced: true},
 		{Key: "speech.provider", Section: "config", Description: "Speech transcription backend (default: elevenlabs); elevenlabs uses the cloud API and falls back to local parakeet when its API key is missing or blank, parakeet runs locally", Value: cfg.Speech.Provider, Choices: SpeechProviders(), Advanced: true},
 		{Key: "speech.language", Section: "config", Description: "Transcription language for every provider; auto lets the provider detect it (Parakeet: en uses the English model and the other codes the multilingual model)", Value: cfg.Speech.Language, Choices: SpeechLanguages(), Advanced: true},
 		{Key: "speech.elevenlabs_api_key", Section: "config", Description: "ElevenLabs only: optional API key stored in the private workspace configuration; a stored key overrides the environment variable, and when empty the environment variable is used at transcription time", Value: secretState(cfg.Speech.ElevenLabsAPIKey), Secret: true, Advanced: true},
@@ -291,6 +292,8 @@ func setSetting(cfg *Config, key, value string) (Setting, error) { //nolint:gocy
 		cfg.Channels.WhatsApp.PollIntervalSec, err = parseInteger(2)
 	case "speech.enabled":
 		cfg.Speech.Enabled, err = parseBoolean()
+	case "speech.transcript_echo":
+		cfg.Speech.TranscriptEcho, err = parseBoolean()
 	case "speech.provider":
 		cfg.Speech.Provider = strings.ToLower(value)
 	case "speech.language":

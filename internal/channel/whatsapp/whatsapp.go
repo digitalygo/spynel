@@ -44,6 +44,7 @@ type Client struct {
 	log                    io.Writer
 	store                  *media.Store
 	speech                 media.Transcriber
+	transcriptEcho         bool
 	incoming               chan incomingMessage
 	download               func(context.Context, whatsmeow.DownloadableMessage, *os.File) error
 	upload                 func(context.Context, io.Reader, io.ReadWriteSeeker, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
@@ -120,6 +121,10 @@ func (c *Client) SetMedia(store *media.Store, speech media.Transcriber) {
 	c.store = store
 	c.speech = speech
 }
+
+// SetTranscriptEcho controls whether a successful audio transcription is
+// echoed back to the chat before the message is dispatched.
+func (c *Client) SetTranscriptEcho(enabled bool) { c.transcriptEcho = enabled }
 
 // SetAllowedNumbersSource installs the live configuration resolver used at
 // startup and immediately before every inbound and outbound provider action.
@@ -820,7 +825,7 @@ func (c *Client) messageWorker(ctx context.Context) {
 			if err := c.requireRuntimeAuthorization(); err != nil {
 				continue
 			}
-			text, err := c.prepareMessage(ctx, incoming)
+			text, echoes, err := c.prepareMessageAndEchoes(ctx, incoming)
 			if err != nil {
 				_ = c.send(ctx, incoming.chat, channel.ErrorResponse("Spynel attachment error: "+err.Error()))
 				continue
@@ -828,23 +833,42 @@ func (c *Client) messageWorker(ctx context.Context) {
 			if err := c.requireRuntimeAuthorization(); err != nil {
 				continue
 			}
+			// Echo each generated transcript back to the chat before dispatch so
+			// the user can spot bad terms while the agent is still working. A
+			// failed echo is non-fatal and never affects the turn.
+			for _, echo := range echoes {
+				_ = c.sendPlain(ctx, incoming.chat, echo)
+			}
 			c.handleWithReplyID(incoming.received, incoming.chat, incoming.sender, text, whatsappReplyTo(incoming.message), "whatsapp:"+incoming.chat.String()+":"+string(incoming.id), nil)
 		}
 	}
 }
 
+// prepareMessage returns the agent-facing text for one inbound message. Use
+// prepareMessageAndEchoes when the generated transcripts must also be echoed.
 func (c *Client) prepareMessage(ctx context.Context, incoming incomingMessage) (string, error) {
+	text, _, err := c.prepareMessageAndEchoes(ctx, incoming)
+	return text, err
+}
+
+// prepareMessageAndEchoes downloads and transcribes attachments. It returns
+// the agent-facing text plus, in order, the generated transcripts to echo back
+// to the chat before dispatch. Echoes exist only for successful transcriptions
+// while transcript echo is enabled; disabled or failed transcription never
+// produces one.
+func (c *Client) prepareMessageAndEchoes(ctx context.Context, incoming incomingMessage) (string, []string, error) {
 	if err := c.requireRuntimeAuthorization(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	parts := []string{messageBody(incoming.message)}
+	var echoes []string
 	downloadable, name, speech, duration, size := downloadableMedia(incoming.message, incoming.id)
 	if downloadable != nil {
 		if c.store == nil {
-			return "", errors.New("attachment storage is not configured")
+			return "", nil, errors.New("attachment storage is not configured")
 		}
 		if c.store.MaxBytes > 0 && size > uint64(c.store.MaxBytes) {
-			return "", fmt.Errorf("attachment exceeds the %d byte limit", c.store.MaxBytes)
+			return "", nil, fmt.Errorf("attachment exceeds the %d byte limit", c.store.MaxBytes)
 		}
 		attachment, err := c.store.Create(ctx, name, func(file *os.File) error {
 			if err := c.requireRuntimeAuthorization(); err != nil {
@@ -856,7 +880,7 @@ func (c *Client) prepareMessage(ctx context.Context, incoming incomingMessage) (
 			return c.client.DownloadToFile(ctx, downloadable, file)
 		})
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		parts = append(parts, attachment.Token())
 		if speech && c.speech == nil {
@@ -866,12 +890,16 @@ func (c *Client) prepareMessage(ctx context.Context, incoming incomingMessage) (
 			transcript, err := c.speech.Transcribe(ctx, media.TranscriptionRequest{Path: attachment.Path, DurationSeconds: duration})
 			if err != nil {
 				parts = append(parts, media.TranscriptionFailedMarker(err))
-				return joinParts(parts), nil
+				return joinParts(parts), echoes, nil
 			}
-			parts = append(parts, media.TranscriptionGeneratedMarker(transcript))
+			generated := media.TranscriptionGeneratedMarker(transcript)
+			parts = append(parts, generated)
+			if c.transcriptEcho {
+				echoes = append(echoes, generated)
+			}
 		}
 	}
-	return joinParts(parts), nil
+	return joinParts(parts), echoes, nil
 }
 
 func (c *Client) reportStatus(state channel.ConnectionState, detail string) {
@@ -1042,13 +1070,26 @@ func whatsappConversation(chat types.JID, sender string) string {
 }
 
 func (c *Client) send(ctx context.Context, chat types.JID, text string) error {
+	return c.sendText(ctx, chat, markdownfmt.WhatsApp(text))
+}
+
+// sendPlain delivers literal user content without Markdown conversion, so an
+// echoed transcript is not reformatted. WhatsApp clients still render matched
+// formatting pairs in received text; that client-side behavior cannot be
+// disabled from the sender and is left untouched. The text send path has no
+// quoted-reply support, so the originating audio message is not referenced.
+func (c *Client) sendPlain(ctx context.Context, chat types.JID, text string) error {
+	return c.sendText(ctx, chat, text)
+}
+
+func (c *Client) sendText(ctx context.Context, chat types.JID, text string) error {
 	if err := c.requireRuntimeAuthorization(); err != nil {
 		return err
 	}
 	if c.client == nil && c.deliver == nil {
 		return errors.New("WhatsApp is not connected")
 	}
-	for _, chunk := range split(markdownfmt.WhatsApp(text), 60000) {
+	for _, chunk := range split(text, 60000) {
 		response, err := c.sendMessage(ctx, chat, &waE2E.Message{Conversation: proto.String(chunk)})
 		if err != nil {
 			return err

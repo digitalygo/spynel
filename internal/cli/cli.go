@@ -1172,6 +1172,7 @@ func startChannels(ctx context.Context, service *app.Service, report channel.Sta
 				bot.SetNoticeReporter(service.SetNotice)
 				store := &media.Store{Directory: cfg.StatePath("attachments", "telegram"), MaxBytes: int64(cfg.Workspace.AttachmentMaxMB) * 1024 * 1024}
 				bot.SetMedia(store, speechTranscriber(cfg.Speech, parakeet, elevenlabs))
+				bot.SetTranscriptEcho(cfg.Speech.TranscriptEcho)
 				return bot, nil
 			},
 		},
@@ -1190,6 +1191,7 @@ func startChannels(ctx context.Context, service *app.Service, report channel.Sta
 				client.SetPairingReporter(service.SetPairing)
 				store := &media.Store{Directory: cfg.StatePath("attachments", "whatsapp"), MaxBytes: int64(cfg.Workspace.AttachmentMaxMB) * 1024 * 1024}
 				client.SetMedia(store, speechTranscriber(cfg.Speech, parakeet, elevenlabs))
+				client.SetTranscriptEcho(cfg.Speech.TranscriptEcho)
 				return client, nil
 			},
 		},

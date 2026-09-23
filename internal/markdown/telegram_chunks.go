@@ -62,7 +62,22 @@ const TelegramTruncationMarker = "\n\n… (response truncated; full response ava
 // Impossible malformed renderer output is safely escaped, never passed
 // through as arbitrary HTML.
 func TelegramChunks(input string) []string {
-	rendered := TelegramHTML(input)
+	return chunkTelegramHTML(TelegramHTML(input))
+}
+
+// TelegramPlainChunks chunks literal plain text for Telegram without
+// interpreting Markdown. The text is HTML-escaped so provider HTML parsing
+// cannot treat content as markup, and the result is chunked and bounded by
+// the exact same reply budget as TelegramChunks. Visible content is the
+// literal input text; concatenated TelegramChunkPlainText output recovers it
+// exactly up to the ordinary truncation boundary.
+func TelegramPlainChunks(input string) []string {
+	return chunkTelegramHTML(html.EscapeString(input))
+}
+
+// chunkTelegramHTML splits renderer-owned HTML (or HTML-escaped plain text)
+// into independently valid Telegram HTML chunks.
+func chunkTelegramHTML(rendered string) []string {
 	if rendered == "" {
 		return nil
 	}

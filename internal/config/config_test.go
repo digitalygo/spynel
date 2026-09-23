@@ -474,6 +474,24 @@ func TestStoreUpdateSavesAndReloadsSharedSnapshot(t *testing.T) {
 	}
 }
 
+func TestTranscriptEchoDefaultsOnAndDecodesExplicitly(t *testing.T) {
+	root := t.TempDir()
+	omitted, err := Load(writeTestConfig(t, root, []byte("version: 1\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !omitted.Speech.TranscriptEcho {
+		t.Fatal("omitted speech.transcript_echo should default on")
+	}
+	loaded, err := Load(writeTestConfig(t, root, []byte("version: 1\nspeech:\n  transcript_echo: false\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Speech.TranscriptEcho {
+		t.Fatal("explicitly disabled speech.transcript_echo decoded as enabled")
+	}
+}
+
 func TestSpeechProviderDefaultsAndNormalization(t *testing.T) {
 	cfg := Default()
 	if cfg.Speech.Provider != SpeechProviderElevenLabs {

@@ -43,6 +43,35 @@ func assertTelegramChunkLimits(t *testing.T, chunks []string) {
 	}
 }
 
+func TestTelegramPlainChunksPreserveLiteralContent(t *testing.T) {
+	input := "[Generated speech transcription; may contain errors]\n**bold** _under_ `code` # heading\n1. list <tag> & \"quotes\""
+	chunks := TelegramPlainChunks(input)
+	if len(chunks) != 1 {
+		t.Fatalf("chunks = %d, want 1", len(chunks))
+	}
+	if visible := TelegramChunkPlainText(chunks[0]); visible != input {
+		t.Fatalf("visible = %q, want %q", visible, input)
+	}
+	if strings.Contains(chunks[0], "<b>") || strings.Contains(chunks[0], "<code>") {
+		t.Fatalf("plain chunk contains rendered markup: %q", chunks[0])
+	}
+	if got := TelegramPlainChunks(""); got != nil {
+		t.Fatalf("empty plain input chunks = %#v, want nil", got)
+	}
+}
+
+func TestTelegramPlainChunksBoundLongLiteralContent(t *testing.T) {
+	input := strings.Repeat("literal *text* with `code` and <tags> & entities\n", 400)
+	chunks := TelegramPlainChunks(input)
+	if len(chunks) == 0 {
+		t.Fatal("long literal input produced no chunks")
+	}
+	assertTelegramChunkLimits(t, chunks)
+	if visible := telegramConcatPlain(chunks); visible != input {
+		t.Fatalf("concatenated visible length = %d, want %d", len(visible), len(input))
+	}
+}
+
 func TestTelegramChunksShortPreservesExactOutput(t *testing.T) {
 	inputs := []string{
 		"hello",
