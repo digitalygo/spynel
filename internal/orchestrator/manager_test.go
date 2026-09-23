@@ -349,7 +349,7 @@ func TestClaimLeasePreventsDuplicatesAndStaleLeaseRecovers(t *testing.T) {
 		t.Fatalf("leases = %#v, %v", leases, err)
 	}
 	lease := leases[0]
-	lease.HeartbeatAt = time.Now().Add(-time.Hour)
+	lease.HeartbeatAt = time.Now().Add(-workflowRoutes()[0].StaleAfter - time.Minute)
 	if err := manager.saveLease(lease); err != nil {
 		t.Fatal(err)
 	}

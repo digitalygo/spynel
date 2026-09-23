@@ -70,7 +70,9 @@ func testJobReconnectAcrossSharedInspection(t *testing.T, recovery string) {
 		if !ok {
 			t.Fatal("missing stale lease")
 		}
-		lease.HeartbeatAt = time.Now().UTC().Add(-time.Hour)
+		// 24 hours is clearly beyond the 4-hour tasks route stale threshold so
+		// ScanOnce recovers the lease.
+		lease.HeartbeatAt = time.Now().UTC().Add(-24 * time.Hour)
 		writeJobLease(t, service, lease)
 	}
 	if recovery != "none" {

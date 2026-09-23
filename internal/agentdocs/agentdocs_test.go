@@ -25,8 +25,8 @@ func TestTaskAndGoalTopicsDocumentLiveListingCommands(t *testing.T) {
 		topic string
 		want  []string
 	}{
-		{topic: "tasks", want: []string{"/tasks", "direct `spynel tasks`", "default to `open`", "three", "review", "failed", "NDJSON", "Telegram", "--detail", "never starts a harness"}},
-		{topic: "goals", want: []string{"/goals", "direct `spynel goals`", "default to `open`", "seven", "abandoned", "NDJSON", "WhatsApp", "round", "without invoking a harness"}},
+		{topic: "tasks", want: []string{"/tasks", "direct `spynel tasks`", "default to `open`", "three", "review", "failed", "NDJSON", "Telegram", "--detail", "never starts a harness", "4 hours"}},
+		{topic: "goals", want: []string{"/goals", "direct `spynel goals`", "default to `open`", "seven", "abandoned", "NDJSON", "WhatsApp", "round", "without invoking a harness", "12 hours"}},
 	} {
 		document, err := Lookup(Request{Topic: test.topic})
 		if err != nil {
