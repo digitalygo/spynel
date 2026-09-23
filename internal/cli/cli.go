@@ -1170,6 +1170,7 @@ func startChannels(ctx context.Context, service *app.Service, report channel.Sta
 			Build: func(cfg config.Config) (channel.Channel, error) {
 				bot := telegram.NewWithIdentityStore(cfg.Channels.Telegram, cfg.TelegramToken(), cfg.StatePath("runtime", "telegram-identities.json"))
 				bot.SetNoticeReporter(service.SetNotice)
+				bot.SetCommands(app.TelegramCommands())
 				store := &media.Store{Directory: cfg.StatePath("attachments", "telegram"), MaxBytes: int64(cfg.Workspace.AttachmentMaxMB) * 1024 * 1024}
 				bot.SetMedia(store, speechTranscriber(cfg.Speech, parakeet, elevenlabs))
 				bot.SetTranscriptEcho(cfg.Speech.TranscriptEcho)

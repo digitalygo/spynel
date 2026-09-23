@@ -38,6 +38,7 @@ type Bot struct {
 	notice            channel.NoticeReporter
 	store             *media.Store
 	speech            media.Transcriber
+	commandMenu       []telegramBotCommand
 	transcriptEcho    bool
 	me                telegramUser
 	activity          *channel.ActivityIndicator[Route]
@@ -263,6 +264,9 @@ func (b *Bot) Run(ctx context.Context, handler channel.Handler) error {
 		return err
 	}
 	_ = json.Unmarshal(result, &b.me)
+	if err := b.registerCommands(ctx); err != nil {
+		return err
+	}
 	if b.store != nil && b.config.AttachmentMaxAgeHours > 0 {
 		if _, err := b.store.CleanupOlderThan(time.Duration(b.config.AttachmentMaxAgeHours) * time.Hour); err != nil {
 			return fmt.Errorf("clean Telegram attachments: %w", err)

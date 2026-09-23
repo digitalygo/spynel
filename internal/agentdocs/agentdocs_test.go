@@ -62,6 +62,10 @@ func TestChannelsTopicDocumentsTelegramTopicsAndRichText(t *testing.T) {
 		"truncation marker",
 		"sendMessage",
 		"rate-limit rejection",
+		"all_private_chats",
+		"native command menu",
+		"surface-invalid",
+		"never replaces inbound allow-list checks",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("channels documentation missing %q:\n%s", want, output)
