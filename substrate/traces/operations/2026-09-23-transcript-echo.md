@@ -1,6 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-23
+updated_at: 2026-09-23
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -39,6 +40,7 @@ supporting_docs:
   - ../../../internal/config/AGENTS.md
   - ../../../internal/markdown/AGENTS.md
   - 2026-09-22-elevenlabs-speech-transcription.md
+  - https://github.com/digitalygo/spynel/releases/tag/v1.5.2
 ---
 
 # Transcript echo for speech transcription
@@ -98,6 +100,8 @@ Documentation pass checks run for this record on this tree:
 
 The user requested a patch release for this feature. It is pending at trace-writing time: no tag, GitHub Release, npm publication, deployment, or release validation has been performed, and none is claimed here. Every changed and new file remains unstaged in the working tree.
 
+Resolved: v1.5.2 was published successfully on 2026-09-23. The [v1.5.2 publication update](#update-2026-09-23-v152-publication) below records the release validation and the live service upgrade.
+
 ## References
 
 - [Root contract](../../../AGENTS.md)
@@ -112,3 +116,31 @@ The user requested a patch release for this feature. It is pending at trace-writ
 - [Configuration DOX](../../../internal/config/AGENTS.md)
 - [Markdown rendering DOX](../../../internal/markdown/AGENTS.md)
 - [ElevenLabs speech transcription record](2026-09-22-elevenlabs-speech-transcription.md)
+
+## Update 2026-09-23: v1.5.2 publication
+
+### Summary
+
+The patch release that the original record left pending is complete. Tag `v1.5.2` targets commit `7965b1588d42b87a447c1b13f48ecb454c403fb5`, and [the v1.5.2 release](https://github.com/digitalygo/spynel/releases/tag/v1.5.2) publishes four native archives plus `checksums.txt`. Release workflow run 35888566349 passed verify, all four native builds, and publish. npm `@digitalygo/spynel@1.5.2` reached `latest` roughly two minutes after publication with SLSA provenance v1 issued through Trusted Publishing without tokens. The live npm-managed home service upgraded from 1.5.1 to 1.5.2 through the official `spynel update` path and restarted in place with rotated instance IDs.
+
+### Technical reasoning
+
+The release was validated in two stages so a broken package or builder could not produce a public tag. Local host package validation first checked `spynel_1.5.2_linux_amd64.tar.gz` (sha256 `ea82037d33bb3c0a89415e514680ed8040fda989999f027f6fd51d0479217183`), and the extracted binary reports version 1.5.2. Manual workflow run 35887297297 then exercised the pipeline with publish skipped: verify and all four native builds passed, and no rerun was needed for flaky failures. Only then did the tagged workflow run publish the archives and checksums, and npm accepted the package through its Trusted Publishing path.
+
+The live upgrade exercised the ordinary user path rather than a simulated install. The Linuxbrew npmrc quirk of mode `0444` was handled with a temporary owner-write grant and a trap that restores the original state: the content hash stayed unchanged and the mode was restored afterward. The restart was a genuine in-place process replacement with rotated instance IDs, not a stale process reporting a new version.
+
+### Impact
+
+- The pending release note in this record is resolved: v1.5.2 is public, tagged, checksummed, and installed on the live service. This record now carries `updated_at: 2026-09-23` and the release URL in `supporting_docs`; the original narrative and `created_at` are unchanged.
+- The restarted service kept its speech configuration: `ELEVENLABS_API_KEY` is present, stored `speech.elevenlabs_api_key` is set, `provider=elevenlabs`, `language=auto`, `model_id=scribe_v2`, and `speech.transcript_echo` still defaults to on with the key absent from the config file.
+- Telegram and Pi reconnected after the restart and stayed idle with inherited settings, harness reviews `never`, and the updater current at 1.5.2.
+- Non-blocking observations for future work: Node 20 `actions/upload-artifact` deprecation annotations in the release workflow, an npm `allowScripts` postinstall advisory, and the npm launcher supervisor retaining the pre-update launcher script in memory until the next full restart.
+
+### Validation
+
+- Local host package validation passed: `spynel_1.5.2_linux_amd64.tar.gz`, sha256 `ea82037d33bb3c0a89415e514680ed8040fda989999f027f6fd51d0479217183`, and the extracted binary reports 1.5.2.
+- Manual validation run 35887297297 passed verify and all four native builds with publish skipped, with no flaky rerun.
+- Release run 35888566349 passed verify, all four native builds, and publish; the release page lists four native archives plus `checksums.txt`.
+- npm `@digitalygo/spynel@1.5.2` became `latest` after about two minutes of registry propagation, with SLSA provenance v1 via Trusted Publishing without tokens.
+- The live npm-managed home service updated 1.5.1 to 1.5.2 through the official `spynel update` path, including the temporary npmrc owner-write with trap restore, unchanged content hash, and restored mode; the restart rotated instance IDs, and Telegram and Pi connected and stayed idle.
+- The restarted service retained `ELEVENLABS_API_KEY` present, stored `speech.elevenlabs_api_key` set, `provider=elevenlabs`, `language=auto`, `model_id=scribe_v2`, and `speech.transcript_echo` defaulting to on with the key absent from the config file.
