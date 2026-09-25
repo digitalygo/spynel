@@ -33,7 +33,7 @@ files_edited:
   - internal/harness/process_fixture_test.go
   - internal/harness/supervisor.go
   - internal/harness/supervisor_test.go
-rationale: Record automatic Pi session naming, private Telegram topic renaming, and explicit `/pi name`, including the at-most-once title rule and the correction for Pi's delayed first-session file creation, with synchronized DOX, compatibility evidence, and verification.
+rationale: Record automatic Pi session naming, private Telegram topic renaming, and explicit `/pi name`, including the at-most-once title rule and the correction for Pi's delayed first-session file creation, with synchronized DOX, compatibility evidence, and verification, plus the v2.0.1 publication and the user-confirmed local deployment closure.
 supporting_docs:
   - ../../../docs/architecture.md
   - ../../../docs/cli.md
@@ -248,3 +248,31 @@ A read-only local preflight found one ready npm-managed v2.0.0 server, Pi and Te
 - Clean detached release-candidate checks passed: DOX, smoke, npm tests, release-prepared `npm pack --dry-run`, and host native packaging with extracted archive execution. The main tree retained the development version placeholder and the unrelated private untracked `.ai-telemetry/` directory was not touched or packaged.
 - The manual and publishing workflow runs succeeded at the same source commit. The public release has exactly five expected assets, npm `latest` is 2.0.1, and the published host archive checksum and version were verified independently.
 - `spynel update --json check` reports installed v2.0.0 and available v2.0.1. No npm replacement, restart, authenticated Pi model request, or live Telegram rename canary has been performed as part of this release task yet.
+
+## Update 2026-09-26: local v2.0.1 deployment
+
+### Summary of changes
+
+The installed npm-managed home service was updated from v2.0.0 to v2.0.1 through one official `spynel update` execution after the operator confirmed that both Telegram authorized accounts would not send messages until readiness was re-confirmed. The same process, PID 2090417, continued under a new generation record, and the CLI, package, and vendor metadata now report 2.0.1. No repository source file changed in this deployment step.
+
+### Technical reasoning
+
+The published release still needed local deployment evidence. A read-only preflight immediately before the update, at 2026-09-26T01:08:53+02:00, found one npm-managed service process, PID 2090417, generation `7646cfd03f85d9b810c8c4ccbecfde0a`, version 2.0.0, ready, with Telegram and Pi connected, no active turn, zero jobs, zero pending outbox entries, and npm `latest` at 2.0.1. The coordinated restart check passed. Spynel has no message-admission pause during an update and the Telegram transport has two authorized numeric senders, so the operator explicitly confirmed that both accounts would refrain from messaging through the brief maintenance window; that confirmation is what made the restart safe.
+
+The update ran as `/home/linuxbrew/.linuxbrew/bin/spynel update` under the same `HOME` as the supervisor, between 01:08:53 and 01:09:00. The known Linuxbrew `npmrc` quirk applied: the file is a regular file owned by `luca` with mode 0444 and sha256 `a0e43e04265c9fc6231f0288288e0088ea033732278f9953d65551dbb8930ccd`. The npmrc was temporarily made owner-writable at 0644, then an `EXIT`/`INT`/`TERM`/`HUP` trap restored its original 0444 mode; its inode and hash stayed unchanged. No direct `npm install`, no `spynel killall`, and no manual restart was used; the official updater owned the whole transaction.
+
+After the update, the same PID 2090417 ran under the new generation `9f7845e5ae7c6c603e733fcb9bb4cf59`, reported ready, and was re-elected primary. Telegram and Pi were connected, jobs were zero, the turn was idle, and `spynel update --json check` reported `Current=Latest 2.0.1` with `Available=false`. The configuration hash and mode and the secret-presence flags were unchanged, the Pi session-map digest was unchanged, the legacy docs metadata digest was unchanged, and the outbox showed four delivered and zero pending entries. The `.spynel` and `.spynel/runtime` directories remained private at 0700. An independent read-only orchestrator recheck at about 01:10 confirmed the externally visible version, health, mode, and registry states and that release run 36194463563 had succeeded.
+
+### Impact assessment
+
+The naming fix is now live on the installed bot. The service kept its PID through an in-place restart, then Telegram and Pi reconnected; the session-map digest remained unchanged while package, CLI, and vendor metadata moved to 2.0.1. Previously unnamed sessions and topics are not renamed retroactively; any private topic still titled "New chat" needs the explicit `/pi name` path. Automatic first-message naming and its Telegram topic rename remain covered by the synthetic fixture and unit evidence recorded above, not by a live canary. No model message and no live Telegram rename canary was sent during this deployment. The repository working tree is unchanged by the deployment, and the unrelated private untracked `.ai-telemetry/` directory was neither inspected nor modified.
+
+### Validation steps
+
+- Pre-update snapshot at 2026-09-26T01:08:53+02:00: one npm-managed service, PID 2090417, generation `7646cfd03f85d9b810c8c4ccbecfde0a`, version 2.0.0, `ready=true`, Telegram and Pi connected, `turn_active=false`, jobs 0, pending outbox 0, coordinated restart check passed, npm `latest` 2.0.1.
+- Pre-update filesystem evidence: root and runtime directories private at 0700, configuration file at 0600, npmrc owned by `luca` as a regular file at 0444 with sha256 `a0e43e04265c9fc6231f0288288e0088ea033732278f9953d65551dbb8930ccd`.
+- Update execution evidence: one official `/home/linuxbrew/.linuxbrew/bin/spynel update` invocation under the supervisor's `HOME` between 01:08:53 and 01:09:00; temporary 0644 npmrc write fenced by an `EXIT`/`INT`/`TERM`/`HUP` trap; original mode 0444, inode, and hash restored; no direct npm install, killall, or manual restart.
+- Post-update evidence: CLI, npm package, and vendor metadata report 2.0.1; PID 2090417 remains under the new generation `9f7845e5ae7c6c603e733fcb9bb4cf59`, `ready=true`, primary re-elected, Telegram and Pi connected, jobs 0, turn idle; `spynel update --json check` reports `Current=Latest 2.0.1` and `Available=false`.
+- State-preservation evidence: configuration hash and mode unchanged, secret-presence flags unchanged, Pi session-map digest unchanged, legacy docs metadata digest unchanged, outbox 4 delivered and 0 pending, `.spynel` and `.spynel/runtime` mode 0700.
+- Independent read-only recheck at about 01:10 confirmed the externally visible version, health, mode, and registry states and the successful release run 36194463563.
+- No model message and no live Telegram rename canary was sent. Existing "New chat" topics still require the explicit `/pi name` path, and the new-session behavior remains covered by the fixture, not by live observation.
