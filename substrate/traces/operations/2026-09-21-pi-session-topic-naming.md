@@ -1,7 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-21
-updated_at: 2026-09-25
+updated_at: 2026-09-26
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -39,6 +39,7 @@ supporting_docs:
   - ../../../docs/cli.md
   - ../../../docs/harness-compatibility.md
   - ../../../docs/integrations.md
+  - ../../../docs/releasing.md
   - 2026-09-20-pi-session-controls.md
   - 2026-09-20-telegram-topic-rich-text.md
   - 2026-09-21-pi-retained-prompt-context.md
@@ -46,6 +47,9 @@ supporting_docs:
   - https://core.telegram.org/bots/api#forumtopiccreated
   - https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md
   - https://github.com/digitalygo/spynel/releases/tag/v1.4.0
+  - https://github.com/digitalygo/spynel/releases/tag/v2.0.1
+  - https://github.com/digitalygo/spynel/actions/runs/36193270388
+  - https://github.com/digitalygo/spynel/actions/runs/36194463563
 ---
 
 # Pi session and Telegram topic naming
@@ -224,3 +228,23 @@ New first-turn Pi sessions can be named through the existing best-effort metadat
 - `go test ./...`, `scripts/dev.sh test` including the nested Bubble Tea module, `go vet ./...`, a Go build, targeted race tests for the harness, application, and Telegram channel, and `git diff --check` passed. `SetSessionName` coverage was 82.5%; its live-process predicate reached 100%.
 - `scripts/dev.sh dox` and `scripts/smoke.sh` passed in a detached worktree containing the exact five-file implementation diff. They cannot pass directly in the main worktree because a pre-existing unrelated untracked `.ai-telemetry/` directory is outside DOX coverage; it was not inspected or modified.
 - Quality judgment: PASS. Focused security review: PASS. No authenticated provider request or live Telegram rename was attempted, and the installed Pi source inspection is reported as observed behavior rather than a canary.
+
+## Update 2026-09-26: v2.0.1 publication and pending local update
+
+### Summary of changes
+
+The six-file Pi naming fix was committed as `2725b6659d1d8c7d55d587f3f724253617177af0` (`fix(pi): name new sessions before first file flush`), pushed to `main`, and published as the stable [v2.0.1 release](https://github.com/digitalygo/spynel/releases/tag/v2.0.1). The annotated tag object is `45c66e5851fee3ccd4f1d6793261382955db7419` and peels to that exact source commit. The installed local bot remains at v2.0.0; no local update has been attempted.
+
+### Technical reasoning
+
+The [nonpublishing validation run](https://github.com/digitalygo/spynel/actions/runs/36193270388) on that commit succeeded in verification and all four native build jobs, with `publish` skipped. Only then was the tag and GitHub Release created. The [release run](https://github.com/digitalygo/spynel/actions/runs/36194463563) succeeded in verification, four native builds, and the mandatory `publish` job. Its five public assets are the Linux and macOS amd64/arm64 archives plus `checksums.txt`; the published Linux amd64 archive checksum is `cdd5b90fc2b1bb31903d84d971d9f06b5f8addaedca8e23013de47a3541f0ad8`. The downloaded host archive passed its published checksum and executed as `spynel 2.0.1`. npm `@digitalygo/spynel@2.0.1` is available under `latest` with SLSA provenance v1.
+
+### Impact assessment
+
+A read-only local preflight found one ready npm-managed v2.0.0 server, Pi and Telegram connected, zero active turns, zero jobs, no pending outbox, and no live TUI clients. However, Telegram has two authorized numeric senders and Spynel has no message-admission pause during an update. A new message admitted after an idle snapshot but before shutdown could lose its live turn, even though messages still queued at Telegram survive the restart. For that reason, the local update is deferred until the operator confirms both authorized accounts will not send messages through the brief maintenance window. Do not silently interrupt a newly admitted turn. Previously unnamed sessions and topics will not be renamed automatically after deployment; `/pi name <name>` is the explicit recovery path.
+
+### Validation steps
+
+- Clean detached release-candidate checks passed: DOX, smoke, npm tests, release-prepared `npm pack --dry-run`, and host native packaging with extracted archive execution. The main tree retained the development version placeholder and the unrelated private untracked `.ai-telemetry/` directory was not touched or packaged.
+- The manual and publishing workflow runs succeeded at the same source commit. The public release has exactly five expected assets, npm `latest` is 2.0.1, and the published host archive checksum and version were verified independently.
+- `spynel update --json check` reports installed v2.0.0 and available v2.0.1. No npm replacement, restart, authenticated Pi model request, or live Telegram rename canary has been performed as part of this release task yet.
