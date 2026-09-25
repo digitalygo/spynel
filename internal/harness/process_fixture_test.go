@@ -176,7 +176,7 @@ func runHarnessFixture(mode string) int {
 		return runCodexFixture(mode)
 	case "claude-stream", "claude-steer", "claude-text", "claude-interrupt", "claude-help-missing-flag", "claude-init-changed-event", "claude-terminal-error", "claude-result-nonzero":
 		return runClaudeFixture(mode)
-	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath", "pi-session-named", "pi-retry-success", "pi-all-failed", "pi-success-then-failed", "pi-no-message", "pi-native-commands", "pi-native-commands-malformed", "pi-native-commands-streaming-state":
+	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath", "pi-session-named", "pi-retry-success", "pi-all-failed", "pi-success-then-failed", "pi-no-message", "pi-native-commands", "pi-native-commands-malformed", "pi-native-commands-streaming-state", "pi-unflushed-session", "pi-unflushed-session-death-on-name":
 		return runPiFixture(mode)
 	case "acp-lifecycle", "acp-interrupt", "acp-version-mismatch", "acp-session-error":
 		return runACPFixture(mode)
@@ -214,6 +214,12 @@ func runPiFixture(mode string) int {
 	if mode == "pi-session-named" {
 		sessionName = "existing provider name"
 	}
+	// pi-unflushed-session and its death variant model Pi's lazy JSONL
+	// persistence: get_state reports the assigned session file path while the
+	// file stays absent until the first assistant message flushes the header
+	// and any session name added before that point.
+	unflushed := mode == "pi-unflushed-session" || mode == "pi-unflushed-session-death-on-name"
+	sessionFlushed := false
 	sessionDir, forkPath, sessionArg := "", "", ""
 	for index, arg := range args {
 		if index+1 >= len(args) {
@@ -295,8 +301,9 @@ func runPiFixture(mode string) int {
 			}
 			// pi-import-preexisting already holds a valid header at the reported
 			// path; report it without rewriting so the adapter must prove the path
-			// did not exist before this import before it may clean it up.
-			if mode != "pi-import-preexisting" || forkPath == "" {
+			// did not exist before this import before it may clean it up. An
+			// unflushed session reports its path without creating the file.
+			if !unflushed && (mode != "pi-import-preexisting" || forkPath == "") {
 				writeFixturePiSession(sessionFile, sessionID, mustGetwd())
 			}
 			if mode == "pi-import-changing" && forkPath != "" {
@@ -324,6 +331,12 @@ func runPiFixture(mode string) int {
 				respond(message, state)
 			}
 		case "set_session_name":
+			if mode == "pi-unflushed-session-death-on-name" {
+				// The provider dies during the naming handshake before its file
+				// exists; the adapter must surface the failure and never launch a
+				// replacement session.
+				return 0
+			}
 			var params struct {
 				Name string `json:"name"`
 			}
@@ -396,6 +409,11 @@ func runPiFixture(mode string) int {
 				}
 			}
 			respond(message, map[string]any{})
+			if unflushed && !sessionFlushed {
+				// The first prompt stays active with no assistant message yet,
+				// matching a provider session that has not flushed its JSONL file.
+				break
+			}
 			if mode == "pi-no-message" {
 				write(map[string]any{"type": "agent_end"})
 				go func() {
@@ -497,6 +515,20 @@ func runPiFixture(mode string) int {
 			}
 		case "steer":
 			respond(message, map[string]any{})
+			if unflushed {
+				// The first assistant message flushes the JSONL session file that
+				// a pre-flush set_session_name left in memory.
+				if !sessionFlushed {
+					flushFixturePiSession(sessionFile, sessionID, mustGetwd(), sessionName, "hello world")
+					sessionFlushed = true
+				}
+				messageStart()
+				delta("hello ")
+				delta("world")
+				messageEnd("hello world", "stop")
+				write(map[string]any{"type": "agent_settled"})
+				break
+			}
 			delta(" second")
 			messageEnd("first second", "stop")
 			write(map[string]any{"type": "agent_settled"})
@@ -640,6 +672,35 @@ func writeFixturePiSession(path, id, cwd string) {
 		return
 	}
 	_ = os.WriteFile(path, append(header, '\n'), 0o600)
+}
+
+// flushFixturePiSession models Pi's first assistant-message persistence: the
+// JSONL session file appears only when the first assistant message is stored,
+// with the session header followed by any session name added before that
+// point and the assistant message entry.
+func flushFixturePiSession(path, id, cwd, name, assistant string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	var parent any
+	writeEntry := func(entry map[string]any) {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return
+		}
+		_, _ = file.Write(append(data, '\n'))
+	}
+	writeEntry(map[string]any{"type": "session", "version": 3, "id": id, "timestamp": "2026-01-01T00:00:00.000Z", "cwd": cwd})
+	if name != "" {
+		writeEntry(map[string]any{"type": "session_info", "id": "entry-name", "parentId": parent, "timestamp": "2026-01-01T00:00:01.000Z", "name": name})
+		parent = "entry-name"
+	}
+	writeEntry(map[string]any{"type": "message", "id": "entry-message", "parentId": parent, "timestamp": "2026-01-01T00:00:02.000Z", "message": map[string]any{"role": "assistant", "stopReason": "stop", "content": []any{map[string]any{"type": "text", "text": assistant}}}})
 }
 
 // readFixturePiSessionID reads one bounded first line for session resume

@@ -57,9 +57,13 @@ func (p *Pi) SessionInfo(key string) (SessionInfo, bool, error) {
 // session through Pi RPC. It runs under the conversation's per-key lock,
 // reuses a matching live process even during an active turn, and otherwise
 // resumes the exact stored session, so naming never creates or rotates
-// provider state. The returned name is the effective provider value read
-// back from get_state after the call; onlyIfEmpty preserves and returns an
-// existing provider name without issuing a rename request.
+// provider state. A matching live process may legitimately own a session Pi
+// has not persisted yet: Pi assigns the session file path during get_state
+// negotiation but defers creating the JSONL file until the first assistant
+// message flushes it, so the regular-file requirement applies only to the
+// persisted-resume path. The returned name is the effective provider value
+// read back from get_state after the call; onlyIfEmpty preserves and returns
+// an existing provider name without issuing a rename request.
 func (p *Pi) SetSessionName(ctx context.Context, key, expectedSessionID, name string, onlyIfEmpty bool) (SessionNameResult, error) {
 	if !utf8.ValidString(name) || strings.TrimSpace(name) == "" {
 		return SessionNameResult{}, errors.New("Pi session name must be nonempty valid UTF-8")
@@ -82,15 +86,21 @@ func (p *Pi) SetSessionName(ctx context.Context, key, expectedSessionID, name st
 	if expectedSessionID == "" || session.ID != expectedSessionID {
 		return SessionNameResult{}, errors.New("the current Pi session does not match the expected session")
 	}
-	if info, err := os.Stat(session.Path); err != nil || !info.Mode().IsRegular() {
-		return SessionNameResult{}, errors.New("the stored Pi session file is unavailable")
-	}
 	// A live process that already serves the expected session is reused even
 	// while its turn is active: naming is metadata-only and must never
 	// interrupt provider work. Session identity is authoritative here; a
 	// concurrently committed model or effort change cannot redirect the exact
-	// session the caller named.
+	// session the caller named. Pi 0.87.1 reports the session file path during
+	// get_state negotiation but defers creating the JSONL file until its first
+	// assistant message persists, so a matching live process legitimately owns
+	// a not-yet-flushed path and naming must not require that file yet. A
+	// missing or non-regular file without a matching live process stays a
+	// persisted-resume failure and is rejected before any process is needed;
+	// a live RPC failure below never falls back to that resume path.
 	if !piProcessServesSession(process, expectedSessionID) {
+		if info, err := os.Stat(session.Path); err != nil || !info.Mode().IsRegular() {
+			return SessionNameResult{}, errors.New("the stored Pi session file is unavailable")
+		}
 		resumed, err := p.resumeExistingProcess(ctx, key, session)
 		if err != nil {
 			return SessionNameResult{}, err

@@ -1,7 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-21
-updated_at: 2026-09-22
+updated_at: 2026-09-25
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
@@ -33,7 +33,7 @@ files_edited:
   - internal/harness/process_fixture_test.go
   - internal/harness/supervisor.go
   - internal/harness/supervisor_test.go
-rationale: Record the completed automatic Pi session naming, private Telegram topic renaming, and explicit `/pi name` control together with the synchronized documentation, DOX, and compiled agent documentation pass, with the quality and security gates already passed and no release requested; the follow-up at-most-once simplification replaced the tri-state implicit-title fence and resynchronized the same documentation set.
+rationale: Record automatic Pi session naming, private Telegram topic renaming, and explicit `/pi name`, including the at-most-once title rule and the correction for Pi's delayed first-session file creation, with synchronized DOX, compatibility evidence, and verification.
 supporting_docs:
   - ../../../docs/architecture.md
   - ../../../docs/cli.md
@@ -203,3 +203,24 @@ Installed users now receive automatic first-message naming, the unconditional at
 - Registry evidence: `@digitalygo/spynel@1.4.0` is `latest` with SLSA provenance v1 via Trusted Publishing without tokens; a clean-prefix install reports 1.4.0 after brief registry edge convergence.
 - Live service evidence after the official `spynel update`: Telegram and Pi connected and idle, model, reasoning, and service inherited, reviews `never`, updater current at 1.4.0, and the `/pi` catalog includes `/pi name`.
 - Non-blocking warnings: Node 20 `actions/upload-artifact` deprecation annotations appeared on the workflow runs and did not affect the builds or published artifacts.
+
+## Update 2026-09-25: name a live Pi session before its first file flush
+
+### Summary of changes
+
+A new Pi session could stay unnamed, leaving its private Telegram topic at "New chat". `SetSessionName` now accepts an expected-ID-matching, live Pi process even when its JSONL session file has not yet appeared; without that live process it still requires a regular stored file before resuming. A portable fixture now reproduces Pi's deferred file creation, and the harness documentation records the distinction.
+
+### Technical reasoning
+
+Spynel triggers first-message naming immediately after Pi accepts the prompt. The installed Pi 0.87.1 reports a session ID and file path first, then creates the JSONL only when it persists the first assistant message. The former unconditional `os.Stat` in `SetSessionName` rejected this valid pre-flush state, logged `session_name_failed`, and prevented the downstream Telegram topic rename. A content-free local log event confirmed this failure class. No title-state tracking, extra prompt, placeholder file, deferred user-facing reply, or retry was introduced. The existing per-conversation lock and expected-session-ID checks still fence the matching live process, and a failed live RPC never falls back to opening another session. The earlier description in this record that naming verifies the stored file even for a live process is superseded for that live pre-flush case only.
+
+### Impact assessment
+
+New first-turn Pi sessions can be named through the existing best-effort metadata path, allowing the unchanged private-topic rename path to run. Persisted resumes still reject missing or non-regular session files. Previously missed session and topic names are not automatically retried; users can explicitly rename an existing eligible Pi session with `/pi name <name>`. No session store, configuration, chat prompt, other harness, or authorization contract changed. The current installed bot remains at v2.0.0 until a separately authorized publication and local update.
+
+### Validation steps
+
+- A synthetic delayed-flush Pi fixture confirmed naming succeeds while the JSONL does not exist, persists its name on the first assistant-message flush, and reuses the same session and process. Separate tests cover missing and non-regular files without a live process, a closed live process, and provider death during naming.
+- `go test ./...`, `scripts/dev.sh test` including the nested Bubble Tea module, `go vet ./...`, a Go build, targeted race tests for the harness, application, and Telegram channel, and `git diff --check` passed. `SetSessionName` coverage was 82.5%; its live-process predicate reached 100%.
+- `scripts/dev.sh dox` and `scripts/smoke.sh` passed in a detached worktree containing the exact five-file implementation diff. They cannot pass directly in the main worktree because a pre-existing unrelated untracked `.ai-telemetry/` directory is outside DOX coverage; it was not inspected or modified.
+- Quality judgment: PASS. Focused security review: PASS. No authenticated provider request or live Telegram rename was attempted, and the installed Pi source inspection is reported as observed behavior rather than a canary.

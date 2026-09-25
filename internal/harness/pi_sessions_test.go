@@ -1274,7 +1274,7 @@ func TestPiSetSessionNameRejections(t *testing.T) {
 	})
 
 	t.Run("missing stored file", func(t *testing.T) {
-		command, root, _ := portableHarnessFixture(t, "pi-lifecycle")
+		command, root, logPath := portableHarnessFixture(t, "pi-lifecycle")
 		sessionsPath := filepath.Join(root, "sessions.json")
 		store, err := json.Marshal(map[string]piSession{"chat": {ID: "11111111-1111-1111-1111-111111111111", Path: filepath.Join(root, "missing.jsonl"), Policy: "ordinary"}})
 		if err != nil {
@@ -1295,6 +1295,36 @@ func TestPiSetSessionNameRejections(t *testing.T) {
 		if _, err := pi.SetSessionName(ctx, "chat", "11111111-1111-1111-1111-111111111111", "Focus", true); err == nil || !strings.Contains(err.Error(), "unavailable") {
 			t.Fatalf("missing-file error = %v", err)
 		}
+		assertNoPiSessionResume(t, logPath)
+	})
+
+	t.Run("nonregular stored file", func(t *testing.T) {
+		command, root, logPath := portableHarnessFixture(t, "pi-lifecycle")
+		sessionsPath := filepath.Join(root, "sessions.json")
+		folderPath := filepath.Join(root, "folder.jsonl")
+		if err := os.Mkdir(folderPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		store, err := json.Marshal(map[string]piSession{"chat": {ID: "22222222-2222-2222-2222-222222222222", Path: folderPath, Policy: "ordinary"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sessionsPath, store, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pi, err := NewPi(piSessionTestConfig(command, root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := piSessionTestContext(t)
+		if err := pi.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		defer pi.Close()
+		if _, err := pi.SetSessionName(ctx, "chat", "22222222-2222-2222-2222-222222222222", "Focus", true); err == nil || !strings.Contains(err.Error(), "unavailable") {
+			t.Fatalf("nonregular-file error = %v", err)
+		}
+		assertNoPiSessionResume(t, logPath)
 	})
 
 	t.Run("empty and invalid names", func(t *testing.T) {
@@ -1426,4 +1456,175 @@ func TestPiSetSessionNameResumesTheStoredSessionWithoutReplacement(t *testing.T)
 	if !resumed {
 		t.Fatal("naming did not resume the stored session file")
 	}
+}
+
+// assertNoPiSessionResume fails when one fixture log shows a persisted-resume
+// launch: the resume path passes an exact `--session <path>` argument, while
+// ordinary starts pass only `--session-dir`.
+func assertNoPiSessionResume(t *testing.T, logPath string) {
+	t.Helper()
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Kind == "invocation" && containsArgument(record.Args, "--session") {
+			t.Fatalf("a Pi session was resumed with %v", record.Args)
+		}
+	}
+}
+
+// TestPiSetSessionNameNamesALiveSessionBeforeItsFileExists covers Pi's lazy
+// JSONL persistence: get_state reports the assigned session file path, the
+// file stays absent until the first assistant message, and naming must reuse
+// the matching live process instead of refusing the not-yet-flushed path.
+func TestPiSetSessionNameNamesALiveSessionBeforeItsFileExists(t *testing.T) {
+	command, root, logPath := portableHarnessFixture(t, "pi-unflushed-session")
+	pi, err := NewPi(piSessionTestConfig(command, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := piSessionTestContext(t)
+	if err := pi.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer pi.Close()
+	// The first prompt is accepted while its assistant message stays pending,
+	// so the turn is active and the provider has flushed nothing yet.
+	if _, _, err := pi.Send(ctx, "chat", "seed", func(core.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	before, ok, err := pi.SessionInfo("chat")
+	if err != nil || !ok || before.ID != "pi-session" || before.Path == "" {
+		t.Fatalf("unflushed session = %#v, %t, %v", before, ok, err)
+	}
+	if _, err := os.Stat(before.Path); !os.IsNotExist(err) {
+		t.Fatalf("fixture created %q before the first assistant message", before.Path)
+	}
+	if !pi.IsActive("chat") {
+		t.Fatal("fixture turn is not active")
+	}
+	result, err := pi.SetSessionName(ctx, "chat", before.ID, "Fix the login flow", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "Fix the login flow" || !result.Changed {
+		t.Fatalf("pre-flush naming result = %#v", result)
+	}
+	if _, err := os.Stat(before.Path); !os.IsNotExist(err) {
+		t.Fatalf("naming created the session file at %q", before.Path)
+	}
+	// The first assistant message flushes the same session file, which must
+	// carry the name the session received before that file existed.
+	settled := make(chan core.Event, 16)
+	if _, steered, err := pi.Send(ctx, "chat", "flush", func(event core.Event) { settled <- event }); err != nil || !steered {
+		t.Fatalf("follow-up send = steered %t, %v", steered, err)
+	}
+	var final core.Event
+	for !final.Done {
+		select {
+		case event := <-settled:
+			if event.Done {
+				final = event
+			}
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for the first assistant message")
+		}
+	}
+	if final.Kind != core.EventFinal || final.Text != "hello world" {
+		t.Fatalf("settled turn = %#v", final)
+	}
+	data, err := os.ReadFile(before.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"id":"pi-session"`) || !strings.Contains(string(data), "Fix the login flow") {
+		t.Fatalf("flushed session file did not persist the pre-flush name: %s", data)
+	}
+	if after, _, _ := pi.SessionInfo("chat"); after != before {
+		t.Fatalf("naming replaced the session: %#v -> %#v", before, after)
+	}
+	// Naming reused the live process: only the initial start ran, and no
+	// persisted-resume invocation appeared.
+	invocations := 0
+	for _, record := range readFixtureRecords(t, logPath) {
+		if record.Kind == "invocation" && !containsArgument(record.Args, "--version") {
+			invocations++
+		}
+	}
+	if invocations != 1 {
+		t.Fatalf("pre-flush naming launched %d provider processes, want 1", invocations)
+	}
+	assertNoPiSessionResume(t, logPath)
+}
+
+// TestPiSetSessionNameWithoutAFlushedSessionNeverLaunchesASession covers the
+// persisted-resume boundary: with no live process serving the expected
+// session and no flushed JSONL file, naming fails closed before any provider
+// launch and never creates or replaces a session, including when the live
+// provider dies during the naming handshake.
+func TestPiSetSessionNameWithoutAFlushedSessionNeverLaunchesASession(t *testing.T) {
+	t.Run("dead live process", func(t *testing.T) {
+		command, root, logPath := portableHarnessFixture(t, "pi-unflushed-session")
+		pi, err := NewPi(piSessionTestConfig(command, root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := piSessionTestContext(t)
+		if err := pi.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		defer pi.Close()
+		if _, _, err := pi.Send(ctx, "chat", "seed", func(core.Event) {}); err != nil {
+			t.Fatal(err)
+		}
+		before, ok, err := pi.SessionInfo("chat")
+		if err != nil || !ok {
+			t.Fatalf("unflushed session = %#v, %t, %v", before, ok, err)
+		}
+		pi.mu.Lock()
+		process := pi.processes["chat"]
+		pi.mu.Unlock()
+		if process == nil {
+			t.Fatal("fixture process is not live")
+		}
+		// Simulate provider death: the process is closed while the session file
+		// was never flushed.
+		process.close()
+		if _, err := pi.SetSessionName(ctx, "chat", before.ID, "Focus", true); err == nil || !strings.Contains(err.Error(), "unavailable") {
+			t.Fatalf("dead-process naming error = %v", err)
+		}
+		if after, _, _ := pi.SessionInfo("chat"); after != before {
+			t.Fatalf("dead-process naming replaced the session: %#v -> %#v", before, after)
+		}
+		assertNoPiSessionResume(t, logPath)
+	})
+
+	t.Run("provider death during naming", func(t *testing.T) {
+		command, root, logPath := portableHarnessFixture(t, "pi-unflushed-session-death-on-name")
+		pi, err := NewPi(piSessionTestConfig(command, root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := piSessionTestContext(t)
+		if err := pi.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		defer pi.Close()
+		if _, _, err := pi.Send(ctx, "chat", "seed", func(core.Event) {}); err != nil {
+			t.Fatal(err)
+		}
+		before, ok, err := pi.SessionInfo("chat")
+		if err != nil || !ok {
+			t.Fatalf("unflushed session = %#v, %t, %v", before, ok, err)
+		}
+		// The live provider exits instead of answering set_session_name; the
+		// failed live RPC must surface and never fall back to a resume.
+		if _, err := pi.SetSessionName(ctx, "chat", before.ID, "Focus", true); err == nil {
+			t.Fatal("naming succeeded after the provider died during the handshake")
+		}
+		if after, _, _ := pi.SessionInfo("chat"); after != before {
+			t.Fatalf("failed naming replaced the session: %#v -> %#v", before, after)
+		}
+		if _, err := os.Stat(before.Path); !os.IsNotExist(err) {
+			t.Fatalf("failed naming created the session file at %q", before.Path)
+		}
+		assertNoPiSessionResume(t, logPath)
+	})
 }
