@@ -1,12 +1,12 @@
 {
   "name": "@digitalygo/spynel",
   "version": "0.0.0-development",
-  "description": "A non-AI orchestration layer connecting one human to many coding agents",
+  "description": "A classic, non-AI program that coordinates and oversees external AI coding harnesses",
   "license": "MIT",
   "keywords": [
     "coding-agent",
     "multi-agent",
-    "orchestration",
+    "coding-harness",
     "terminal-ui",
     "telegram",
     "whatsapp",

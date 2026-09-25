@@ -123,6 +123,36 @@ func NewPi(cfg HarnessConfig) (*Pi, error) {
 
 func (p *Pi) FollowUpMode() FollowUpMode { return FollowUpSteer }
 
+// NativeConversationInput reports whether an ordinary send for key delivers
+// the raw accepted conversation text that Pi expands with its own native
+// skills, prompt templates, and extension commands. Only session keys
+// matching the ordinary `chat:<channel>:<conversation>` grammar qualify;
+// control and unknown keys report false so the caller keeps
+// the provider-neutral bounded-context prompt.
+func (p *Pi) NativeConversationInput(key string) bool {
+	return piOrdinaryConversationKey(key)
+}
+
+// piOrdinaryConversationKey reports whether key matches the provider-neutral
+// conversation grammar `chat:<channel>:<conversation>` with nonempty channel
+// and conversation segments. All other keys report false.
+func piOrdinaryConversationKey(key string) bool {
+	rest, ok := strings.CutPrefix(key, "chat:")
+	if !ok {
+		return false
+	}
+	channel, conversation, ok := strings.Cut(rest, ":")
+	return ok && channel != "" && conversation != "" && !strings.Contains(conversation, ":")
+}
+
+// piTelegramConversationKey reports whether key is an ordinary conversation
+// on the telegram channel, matching the exact `chat:telegram:<conversation>`
+// grammar with a nonempty conversation segment.
+func piTelegramConversationKey(key string) bool {
+	conversation, ok := strings.CutPrefix(key, "chat:telegram:")
+	return ok && conversation != "" && !strings.Contains(conversation, ":")
+}
+
 func (p *Pi) Start(parent context.Context) error {
 	p.mu.Lock()
 	if p.ctx != nil {
@@ -207,7 +237,12 @@ func (p *Pi) SendWithInference(ctx context.Context, key, prompt string, selectio
 	active := process.active
 	process.mu.Unlock()
 	if active != nil {
-		threadID, err := p.steerLocked(ctx, process, prompt, emit, nil)
+		// Raw slash input keeps Pi's own native expansion during an active
+		// turn: Pi rejects extension commands on steer, so recognized
+		// extension commands, skills, prompt templates, and unknown slash
+		// names all travel through prompt with streamingBehavior "steer".
+		native := strings.HasPrefix(prompt, "/")
+		threadID, err := p.steerLocked(ctx, process, prompt, emit, nil, native)
 		return threadID, true, err
 	}
 	turn := &piTurn{emit: emit}
@@ -231,7 +266,24 @@ func (p *Pi) SendWithInference(ctx context.Context, key, prompt string, selectio
 		emit(core.Event{Kind: core.EventStatus, Text: "Pi turn started", ThreadID: process.session.ID,
 			Execution: &core.ExecutionStatus{State: "running"}})
 	}
+	if name, ok := piNativeCommandName(prompt); ok && process.extensionCommandRecognized(ctx, name) {
+		process.settleNativeCommandWithoutRun(ctx, turn, name)
+	}
 	return process.session.ID, false, nil
+}
+
+// piNativeCommandName reports the native command name for raw slash input
+// using Pi's exact parsing: the token between the leading slash and the
+// first space. Non-slash input never names a command.
+func piNativeCommandName(prompt string) (string, bool) {
+	if !strings.HasPrefix(prompt, "/") {
+		return "", false
+	}
+	rest := prompt[1:]
+	if index := strings.Index(rest, " "); index >= 0 {
+		return rest[:index], true
+	}
+	return rest, true
 }
 
 func (p *Pi) Steer(ctx context.Context, key, prompt string, emit core.Emit, beforeDelivery func() bool) (string, error) {
@@ -247,10 +299,19 @@ func (p *Pi) Steer(ctx context.Context, key, prompt string, emit core.Emit, befo
 	if process == nil {
 		return p.ThreadID(key), fmt.Errorf("Pi turn is no longer active: %w", errNativeTurnInactive)
 	}
-	return p.steerLocked(ctx, process, prompt, emit, beforeDelivery)
+	// Control-plane deliveries keep the strict steer command so delimited
+	// coordination text is never interpreted as a native command.
+	return p.steerLocked(ctx, process, prompt, emit, beforeDelivery, false)
 }
 
-func (p *Pi) steerLocked(ctx context.Context, process *piProcess, prompt string, emit core.Emit, beforeDelivery func() bool) (string, error) {
+// steerLocked delivers a follow-up into the turn that is already active for
+// the process. Ordinary text uses Pi's steer command. Raw slash input sets
+// native because Pi rejects extension commands on steer and instead executes
+// recognized extension commands immediately, expands skills and prompt
+// templates, and queues unknown slash names, all through prompt with
+// streamingBehavior "steer". Delivery order, the durable iteration
+// reservation, and the emitter transfer stay identical for both forms.
+func (p *Pi) steerLocked(ctx context.Context, process *piProcess, prompt string, emit core.Emit, beforeDelivery func() bool, native bool) (string, error) {
 	process.mu.Lock()
 	turn := process.active
 	process.mu.Unlock()
@@ -267,7 +328,11 @@ func (p *Pi) steerLocked(ctx context.Context, process *piProcess, prompt string,
 	}
 	var previous core.Emit
 	reserved := false
-	_, err := process.call(ctx, map[string]any{"type": "steer", "message": prompt}, func() bool {
+	message := map[string]any{"type": "steer", "message": prompt}
+	if native {
+		message = map[string]any{"type": "prompt", "message": prompt, "streamingBehavior": "steer"}
+	}
+	_, err := process.call(ctx, message, func() bool {
 		if beforeDelivery != nil && !beforeDelivery() {
 			return false
 		}
@@ -631,6 +696,21 @@ func (p *Pi) startProcessArgs(ctx context.Context, key string, args []string, cf
 	if cfg.Sandbox == "read-only" {
 		args = append(args, "--tools", "read,grep,find,ls")
 	}
+	// Telegram conversations see final replies only, so every process launch
+	// for a chat:telegram key loads exactly one Spynel-authored Pi extension
+	// additively through --extension. On before_agent_start the extension adds
+	// one namespaced system prompt section, so Pi keeps discovering the user's
+	// global and trusted-project APPEND_SYSTEM.md, and ordinary global
+	// extensions, skills, templates, themes, and context files stay untouched.
+	// Ephemeral discovery processes and every other channel never load it.
+	if piTelegramConversationKey(key) {
+		extensionPath, err := ensurePiTelegramNoteExtension(cfg)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("prepare the Telegram note extension: %w", err)
+		}
+		args = append(args, "--extension", extensionPath)
+	}
 	command := exec.CommandContext(processContext, cfg.Command, args...)
 	command.Dir = cfg.Cwd
 	command.Env = piProcessEnvironment(cfg.Env)
@@ -828,6 +908,65 @@ func emptyPiError(value string) string {
 		return "Pi RPC command failed"
 	}
 	return value
+}
+
+// extensionCommandRecognized reports whether the live Pi session registers an
+// extension command with the exact name, so a raw slash dispatch is known to
+// execute immediately inside Pi instead of queueing an ordinary prompt. Any
+// query failure reports false so dispatch keeps the ordinary event-driven
+// lifecycle.
+func (process *piProcess) extensionCommandRecognized(ctx context.Context, name string) bool {
+	if name == "" {
+		return false
+	}
+	data, err := process.call(ctx, map[string]any{"type": "get_commands"}, nil)
+	if err != nil {
+		return false
+	}
+	var response struct {
+		Commands []struct {
+			Name   string `json:"name"`
+			Source string `json:"source"`
+		} `json:"commands"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return false
+	}
+	for _, command := range response.Commands {
+		if command.Name == name && command.Source == "extension" {
+			return true
+		}
+	}
+	return false
+}
+
+// settleNativeCommandWithoutRun ends a turn that Pi accepted as a recognized
+// native extension command. Pi awaits the command handler before the prompt
+// response, and an accepted ordinary prompt is already streaming when the
+// client sees that response, so a following get_state reporting an idle
+// session is positive evidence that the command was handled without a model
+// run and no agent_settled will ever arrive. The settlement is deliberately
+// honest: one plain status and the ordinary empty final, never a fabricated
+// model answer derived from the RPC acknowledgment. A handler that started a
+// run keeps ordinary agent_settled settlement authoritative, including runs
+// that already settled the turn before the response arrived.
+func (process *piProcess) settleNativeCommandWithoutRun(ctx context.Context, turn *piTurn, name string) {
+	data, err := process.call(ctx, map[string]any{"type": "get_state"}, nil)
+	if err != nil {
+		return
+	}
+	var state piState
+	if err := json.Unmarshal(data, &state); err != nil || state.IsStreaming {
+		return
+	}
+	process.mu.Lock()
+	stillActive := process.active == turn
+	process.mu.Unlock()
+	if !stillActive {
+		return
+	}
+	turn.emitEvent(core.Event{Kind: core.EventStatus, Text: fmt.Sprintf("Pi handled native command /%s without a model run", name), ThreadID: process.session.ID})
+	process.finishTurn(turn)
 }
 
 func (process *piProcess) handleEvent(kind string, event map[string]json.RawMessage) {

@@ -12,7 +12,6 @@ import (
 	"github.com/digitalygo/spynel/internal/channel"
 	"github.com/digitalygo/spynel/internal/config"
 	"github.com/digitalygo/spynel/internal/core"
-	"github.com/digitalygo/spynel/internal/harness"
 	"github.com/digitalygo/spynel/internal/instance"
 	"github.com/digitalygo/spynel/internal/localapi"
 	"github.com/digitalygo/spynel/internal/theme"
@@ -33,11 +32,11 @@ type primaryTerm struct {
 	listener net.Listener
 	service  *app.Service
 
-	apiDone          chan struct{}
-	apiError         chan error
-	channelsDone     <-chan error
-	orchestratorDone chan error
-	stopOnce         sync.Once
+	apiDone         chan struct{}
+	apiError        chan error
+	channelsDone    <-chan error
+	maintenanceDone chan error
+	stopOnce        sync.Once
 }
 
 func runOwnerElection(ctx context.Context, cfg config.Config, version string, election *instance.Election, restart func(), update func(updater.Result), options ...primaryOptions) error {
@@ -172,9 +171,6 @@ func startPrimaryTerm(parent context.Context, original config.Config, version st
 		}
 	}()
 	service.Runtime.LogEvent("info", "config", "reloaded", "Configuration loaded for primary startup")
-	service.SetRecoveryOwnershipFence(func(action func() error) (bool, error) {
-		return election.RunWhileOwner(token, action)
-	})
 	service.SetPrimaryInstanceID(election.ID())
 	if err := service.Start(ctx); err != nil {
 		service.Runtime.LogEvent("error", "harness", "unavailable", "Harness unavailable: "+err.Error())
@@ -190,7 +186,7 @@ func startPrimaryTerm(parent context.Context, original config.Config, version st
 	service.Runtime.LogEvent("info", "runtime", "primary_started", "Spynel primary server started")
 	term := &primaryTerm{
 		election: election, token: token, cancel: cancel, listener: listener, service: service,
-		apiDone: make(chan struct{}), apiError: make(chan error, 1), orchestratorDone: make(chan error, 1),
+		apiDone: make(chan struct{}), apiError: make(chan error, 1), maintenanceDone: make(chan error, 1),
 	}
 	reportConnection := func(status channel.ConnectionStatus) { service.SetConnectionStatus(status) }
 	term.channelsDone, err = startChannels(ctx, service, reportConnection)
@@ -222,8 +218,8 @@ func startPrimaryTerm(parent context.Context, original config.Config, version st
 	}()
 
 	go func() {
-		defer service.Runtime.RecoverPanic("orchestrator", "worker_panic")
-		term.orchestratorDone <- runPrimaryOrchestrator(ctx, service)
+		defer service.Runtime.RecoverPanic("maintenance", "worker_panic")
+		term.maintenanceDone <- runPrimaryMaintenance(ctx, service)
 	}()
 	go func() {
 		defer service.Runtime.RecoverPanic("runtime", "request_panic")
@@ -239,17 +235,11 @@ func startPrimaryTerm(parent context.Context, original config.Config, version st
 	return term, nil
 }
 
-func runPrimaryOrchestrator(ctx context.Context, service *app.Service) error {
-	if availability, ok := service.Harness.(harness.Availability); ok {
-		if ready, _ := availability.Available(); !ready {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-availability.ReadyEvents():
-			}
-		}
-	}
-	return service.Orchestrator.Run(ctx)
+// runPrimaryMaintenance keeps the elected owner's notification retries and
+// periodic cleanup running for the whole primary term, independent of whether
+// a harness is currently available.
+func runPrimaryMaintenance(ctx context.Context, service *app.Service) error {
+	return service.RunPrimaryMaintenance(ctx)
 }
 
 func (term *primaryTerm) stop() {
@@ -272,8 +262,7 @@ func (term *primaryTerm) stopFor(targetID string) error {
 		_ = term.service.Harness.Close()
 		<-term.apiDone
 		<-term.channelsDone
-		<-term.orchestratorDone
-		term.service.Orchestrator.Wait()
+		<-term.maintenanceDone
 		if targetID != "" {
 			_, handedOff, err := term.election.Handoff(term.token, targetID)
 			if err == nil && handedOff {
@@ -312,30 +301,15 @@ type tuiStateEvents struct {
 	titles      chan string
 	themes      chan theme.Theme
 	runtime     chan core.RuntimeStatus
-	durableWork chan core.DurableWorkCounts
-	activity    chan core.Event
-	activitySet chan int
 }
 
-func startTUIStatePolling(ctx context.Context, client *localapi.Client, initial app.SharedState, themeDirectory string, conversations ...string) tuiStateEvents {
+func startTUIStatePolling(ctx context.Context, client *localapi.Client, initial app.SharedState, themeDirectory string) tuiStateEvents {
 	events := tuiStateEvents{
 		connections: make(chan channel.ConnectionStatus, 4),
 		pairings:    make(chan channel.PairingEvent, 4),
 		notices:     make(chan channel.Notice, 4), titles: make(chan string, 1),
 		themes: make(chan theme.Theme, 1), runtime: make(chan core.RuntimeStatus, 1),
-		durableWork: make(chan core.DurableWorkCounts, 1),
-		activity:    make(chan core.Event, 16),
-		activitySet: make(chan int, 1),
 	}
-	conversation := ""
-	if len(conversations) > 0 {
-		conversation = conversations[0]
-	}
-	initialActivity := 0
-	if conversation != "" {
-		initialActivity = initial.ConversationActivity
-	}
-	go bridgeTUIActivity(ctx, events.activity, events.activitySet, initialActivity)
 	go func() {
 		previous := initial
 		ticker := time.NewTicker(time.Second)
@@ -350,14 +324,14 @@ func startTUIStatePolling(ctx context.Context, client *localapi.Client, initial 
 			if err != nil {
 				continue
 			}
-			publishTUIStateChanges(events, previous, state, themeDirectory, conversation)
+			publishTUIStateChanges(events, previous, state, themeDirectory)
 			previous = state
 		}
 	}()
 	return events
 }
 
-func publishTUIStateChanges(events tuiStateEvents, previous, state app.SharedState, themeDirectory string, conversation ...string) {
+func publishTUIStateChanges(events tuiStateEvents, previous, state app.SharedState, themeDirectory string) {
 	if state.Title != previous.Title {
 		publishLatest(events.titles, state.Title)
 	}
@@ -383,44 +357,8 @@ func publishTUIStateChanges(events tuiStateEvents, previous, state app.SharedSta
 	if state.Runtime != previous.Runtime {
 		publishLatest(events.runtime, state.Runtime)
 	}
-	if state.DurableWork != previous.DurableWork {
-		publishLatest(events.durableWork, state.DurableWork)
-	}
 	if state.NoticeSequence != previous.NoticeSequence && state.Notice.Channel != "" {
 		publishLatest(events.notices, state.Notice)
-	}
-	if len(conversation) > 0 {
-		publishLatest(events.activitySet, state.ConversationActivity)
-	}
-}
-
-// bridgeTUIActivity converts latest-value shared-state counts into the balanced
-// event stream consumed by the TUI. Keeping the desired count separate from the
-// output means neither startup nor polling can block behind an unstarted or slow
-// TUI consumer, even when the overlap count exceeds the event buffer.
-func bridgeTUIActivity(ctx context.Context, output chan<- core.Event, desired <-chan int, initial int) {
-	current, target := 0, initial
-	for {
-		if current == target {
-			select {
-			case <-ctx.Done():
-				return
-			case target = <-desired:
-			}
-			continue
-		}
-		event := core.Event{Kind: core.EventActivity, Active: current < target}
-		select {
-		case <-ctx.Done():
-			return
-		case target = <-desired:
-		case output <- event:
-			if event.Active {
-				current++
-			} else {
-				current--
-			}
-		}
 	}
 }
 

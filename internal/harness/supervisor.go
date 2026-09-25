@@ -509,7 +509,7 @@ func (s *Supervisor) executionEmit(key string, target Harness, emit core.Emit) c
 					return
 				}
 			} else if control := s.controls[key]; control != nil && !control.continued && control.continuationPrompt != "" {
-				// Let the owning orchestrator emitter first persist the provider's
+				// Let the session's current execution emitter first persist the provider's
 				// terminal event as awaiting_transition. The continuation gate then
 				// revalidates and returns that exact lease to processing.
 				s.mu.Unlock()
@@ -920,6 +920,26 @@ func (s *Supervisor) ProvidesConversationContext(key string) bool {
 		return false
 	}
 	return provider.ProvidesConversationContext(key)
+}
+
+// NativeConversationInput forwards the optional provider-neutral
+// native-conversation capability. It snapshots the target under the mutex and
+// queries the adapter outside it. A closed supervisor, an unavailable target,
+// or a harness without the capability reports false so callers always keep
+// the provider-neutral bounded-context prompt.
+func (s *Supervisor) NativeConversationInput(key string) bool {
+	s.mu.RLock()
+	target := s.current
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed || target == nil {
+		return false
+	}
+	provider, ok := target.(NativeConversationInputProvider)
+	if !ok {
+		return false
+	}
+	return provider.NativeConversationInput(key)
 }
 
 func (s *Supervisor) Close() error {

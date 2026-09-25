@@ -1007,12 +1007,15 @@ func TestRuntimeLogInformationalAppendFailureIsVisible(t *testing.T) {
 
 func TestRuntimeLogPersistenceWaitIsBoundedAndVisible(t *testing.T) {
 	runtime := NewRuntimeAt(t.TempDir(), "blocked")
-	runtime.persist.wait = 20 * time.Millisecond
+	// The persistence worker reads its wait budget from the initialized
+	// default, so the test must not mutate it after the goroutine starts.
 	runtime.persist.mu.Lock() // Simulate a stalled filesystem operation in the worker.
 	started := time.Now()
 	runtime.LogEvent("error", "fixture", "blocked_write", "important evidence")
 	elapsed := time.Since(started)
-	if elapsed > 500*time.Millisecond {
+	// The forced-flush error write waits up to runtimeLogWait for its
+	// acknowledgement before surfacing the timeout; allow scheduling headroom.
+	if elapsed > runtimeLogWait+500*time.Millisecond {
 		t.Fatalf("important log write blocked for %s", elapsed)
 	}
 	var found bool

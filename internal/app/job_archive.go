@@ -254,10 +254,7 @@ func (a *JobArchive) begin(job Job) (string, error) {
 	if owner == nil {
 		return job.StableID, errors.New("job archive ownership was not claimed")
 	}
-	title := archiveField(job.Description, maxJobDescription)
-	if job.Channel != "orchestrator" {
-		title = "conversation"
-	}
+	title := "conversation"
 	record := &archivedJob{
 		StableID: job.StableID, LiveID: job.Number, Generation: job.Generation, Title: title,
 		Kind: archiveField(job.Kind, 80), Origin: archiveOrigin(job), Provider: archiveField(job.Provider, 80),
@@ -300,27 +297,7 @@ func (a *JobArchive) begin(job Job) (string, error) {
 }
 
 func archiveOrigin(job Job) string {
-	if job.Channel != "orchestrator" {
-		return "chat/" + archiveField(job.Channel, 40)
-	}
-	switch job.Kind {
-	case "heartbeat":
-		return "heartbeat"
-	case "notification":
-		return "notification"
-	case "task":
-		if strings.Contains(job.LeasePhase, "review") {
-			return "task-review"
-		}
-		return "task-implementation"
-	case "goal":
-		if strings.Contains(job.LeasePhase, "review") {
-			return "goal-review"
-		}
-		return "goal-planning"
-	default:
-		return "orchestrator"
-	}
+	return "chat/" + archiveField(job.Channel, 40)
 }
 
 func (a *JobArchive) update(job Job) error {
@@ -331,11 +308,7 @@ func (a *JobArchive) update(job Job) error {
 		return nil
 	}
 	record.State = string(job.Execution)
-	record.Phase = archiveField(job.LeasePhase, 80)
 	record.ProviderIterations = job.ProviderIterations
-	record.ImplementationAttempt = job.ImplementationAttempts
-	record.PhaseAttempt = job.PhaseAttempt
-	record.RecoveryCount = job.RecoveryCount
 	record.Origin = archiveOrigin(job)
 	return a.writeLocked(record)
 }

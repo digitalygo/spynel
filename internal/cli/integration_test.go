@@ -40,7 +40,6 @@ func TestCLIIntegrationFollowupCancellationAndProtocolOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Extensions.Enabled = false
-	cfg.Orchestrator.Enabled = false
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}

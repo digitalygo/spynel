@@ -7,7 +7,7 @@ import (
 
 func TestOnlyExtensionSettingsRequireRestart(t *testing.T) {
 	cfg := Default()
-	for _, key := range []string{"orchestrator.enabled", "orchestrator.interval_seconds", "orchestrator.retrigger_unresponded_messages", "orchestrator.semantic_heartbeat_minutes", "orchestrator.task_notifications", "orchestrator.max_parallel"} {
+	for _, key := range []string{"harness.name", "harness.model", "harness.reasoning_effort", "harness.service_mode", "harness.sandbox", "workspace.cleanup_retention_days", "speech.provider", "startup.enabled"} {
 		setting, ok := SettingByKey(cfg, key)
 		if !ok || setting.Restart {
 			t.Fatalf("live setting %q = %#v, present %t", key, setting, ok)
@@ -38,15 +38,13 @@ func TestSetSettingParsesSharedCommandValues(t *testing.T) {
 		{"channels.telegram.allowed_users", "@one, 42"},
 		{"channels.whatsapp.mode", "dedicated"},
 		{"speech.language", "fr"},
-		{"orchestrator.interval_seconds", "15"},
-		{"orchestrator.semantic_heartbeat_minutes", "30"},
 		{"extensions.hook_timeout", "45s"},
 	} {
 		if _, err := SetSetting(&cfg, test.key, test.value); err != nil {
 			t.Fatalf("set %s: %v", test.key, err)
 		}
 	}
-	if cfg.Workspace.HistoryMaxMessages != 24 || cfg.Workspace.CleanupRetentionDays != 45 || cfg.Harness.Name != "claude-code" || cfg.Harness.Sandbox != "danger-full-access" || cfg.Channels.TUI.Theme != "catppuccin-latte" || len(cfg.Channels.Telegram.AllowedUsers) != 2 || cfg.Channels.WhatsApp.Mode != "dedicated" || cfg.Speech.Language != "fr" || cfg.Orchestrator.IntervalSec != 15 || cfg.Orchestrator.SemanticHeartbeatMinutes != 30 || cfg.Extensions.HookTimeout != "45s" {
+	if cfg.Workspace.HistoryMaxMessages != 24 || cfg.Workspace.CleanupRetentionDays != 45 || cfg.Harness.Name != "claude-code" || cfg.Harness.Sandbox != "danger-full-access" || cfg.Channels.TUI.Theme != "catppuccin-latte" || len(cfg.Channels.Telegram.AllowedUsers) != 2 || cfg.Channels.WhatsApp.Mode != "dedicated" || cfg.Speech.Language != "fr" || cfg.Extensions.HookTimeout != "45s" {
 		t.Fatalf("unexpected config after settings: %#v", cfg)
 	}
 }
@@ -332,25 +330,12 @@ func TestMainSettingsExposeOnlySimpleHarnessChoicesAndPutAdvancedLast(t *testing
 		}
 	}
 	for _, key := range []string{
-		"harness.name", "harness.model", "harness.sandbox", "harness.reviews",
-		"harness.chat_agent_prefix", "harness.developer_agent_prefix", "harness.reviewer_agent_prefix", "harness.heartbeat_agent_prefix",
+		"harness.name", "harness.model", "harness.sandbox",
 		"harness.acp_command", "harness.acp_args",
 	} {
 		setting, ok := SettingByKey(cfg, key)
 		if !ok || setting.Section != "harness" {
 			t.Fatalf("harness setting %q = %#v, %t", key, setting, ok)
-		}
-	}
-	prefixDescriptions := map[string]string{
-		"harness.chat_agent_prefix":      "communication-agent messages",
-		"harness.developer_agent_prefix": "implementation and planning agent messages",
-		"harness.reviewer_agent_prefix":  "task and goal reviewer messages",
-		"harness.heartbeat_agent_prefix": "semantic-heartbeat audit agent messages",
-	}
-	for key, role := range prefixDescriptions {
-		setting, ok := SettingByKey(cfg, key)
-		if !ok || setting.Value != "" || !strings.Contains(setting.Description, "Optionally prefix "+role) || !strings.Contains(setting.Description, "like `/goal`") {
-			t.Fatalf("agent-prefix setting %q = %#v, %t", key, setting, ok)
 		}
 	}
 	for _, key := range []string{"harness.acp_command", "harness.acp_args"} {
@@ -362,30 +347,6 @@ func TestMainSettingsExposeOnlySimpleHarnessChoicesAndPutAdvancedLast(t *testing
 	sandbox, ok := SettingByKey(cfg, "harness.sandbox")
 	if !ok || sandbox.Section != "harness" || len(sandbox.Choices) != 3 || sandbox.Value != "danger-full-access" {
 		t.Fatalf("sandbox setting = %#v, %t", sandbox, ok)
-	}
-	reviews, ok := SettingByKey(cfg, "harness.reviews")
-	if !ok || strings.Join(reviews.Choices, ",") != "skip-trivial,always,never" || reviews.Value != "skip-trivial" {
-		t.Fatalf("review-mode setting = %#v, %t", reviews, ok)
-	}
-}
-
-func TestSetHarnessAgentPolicySettings(t *testing.T) {
-	cfg := Default()
-	_, err := SetSettings(&cfg, map[string]string{
-		"harness.chat_agent_prefix":      "/ultrathink",
-		"harness.developer_agent_prefix": "/dev",
-		"harness.reviewer_agent_prefix":  "/review",
-		"harness.heartbeat_agent_prefix": "/audit",
-		"harness.reviews":                "skip-trivial",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Harness.ChatAgentPrefix != "/ultrathink" || cfg.Harness.DeveloperAgentPrefix != "/dev" || cfg.Harness.ReviewerAgentPrefix != "/review" || cfg.Harness.HeartbeatAgentPrefix != "/audit" || cfg.Harness.Reviews != TaskReviewsSkipTrivial {
-		t.Fatalf("agent policy settings = %#v", cfg.Harness)
-	}
-	if _, err := SetSetting(&cfg, "harness.reviews", "sometimes"); err == nil {
-		t.Fatal("invalid review mode was accepted")
 	}
 }
 
@@ -532,13 +493,20 @@ func TestWhatsAppWhitelistAndEnabledStateValidateAtomically(t *testing.T) {
 	}
 }
 
-func TestRoutesAreNotASetting(t *testing.T) {
+func TestRetiredWorkflowSettingsAreNotConfigurable(t *testing.T) {
 	cfg := Default()
-	if _, ok := SettingByKey(cfg, "orchestrator.routes"); ok {
-		t.Fatal("routes remain exposed")
-	}
-	if _, err := SetSetting(&cfg, "orchestrator.routes", "[]"); err == nil {
-		t.Fatal("retired setting accepted")
+	for _, key := range []string{
+		"orchestrator.enabled", "orchestrator.interval_seconds", "orchestrator.retrigger_unresponded_messages",
+		"orchestrator.semantic_heartbeat_minutes", "orchestrator.task_notifications", "orchestrator.max_parallel",
+		"harness.reviews", "harness.chat_agent_prefix", "harness.developer_agent_prefix",
+		"harness.reviewer_agent_prefix", "harness.heartbeat_agent_prefix",
+	} {
+		if _, ok := SettingByKey(cfg, key); ok {
+			t.Fatalf("retired setting %q is still exposed", key)
+		}
+		if _, err := SetSetting(&cfg, key, "stale"); err == nil {
+			t.Fatalf("retired setting %q can still be changed", key)
+		}
 	}
 }
 

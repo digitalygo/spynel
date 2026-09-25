@@ -73,11 +73,11 @@ type Event struct {
 	Execution *ExecutionStatus `json:"execution,omitempty"`
 }
 
-// ExecutionStatus describes a live provider turn without mixing in a durable
-// task/goal phase or outcome. A stalled state is valid only when the provider
-// supplies explicit structured evidence; consumers must not infer it from a
-// quiet text stream. Detail is optional, sanitized by the application, and
-// intended for short retry/error context only.
+// ExecutionStatus describes a live provider turn's lifecycle only; it never
+// represents durable job or archive state. A stalled state is valid only when
+// the provider supplies explicit structured evidence; consumers must not infer
+// it from a quiet text stream. Detail is optional, sanitized by the
+// application, and intended for short retry/error context only.
 type ExecutionStatus struct {
 	State            string    `json:"state"`
 	Detail           string    `json:"detail,omitempty"`
@@ -171,14 +171,6 @@ type RuntimeStatus struct {
 	// LiveJobs counts executing jobs across all channels and conversations,
 	// excluding registered records that are stalled or settling.
 	LiveJobs int `json:"live_jobs"`
-}
-
-// DurableWorkCounts is the current nonterminal task and goal census used by
-// constrained live status surfaces. Detailed diagnostics remain on the
-// application shared-state boundary.
-type DurableWorkCounts struct {
-	Tasks int `json:"tasks"`
-	Goals int `json:"goals"`
 }
 
 const (

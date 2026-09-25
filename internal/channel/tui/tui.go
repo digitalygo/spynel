@@ -41,9 +41,8 @@ type pairingEvent struct{ event channel.PairingEvent }
 type noticeEvent struct{ notice channel.Notice }
 type titleEvent struct{ title string }
 type runtimeEvent struct{ status core.RuntimeStatus }
-type durableWorkEvent struct{ counts core.DurableWorkCounts }
 type themeEvent struct{ theme theme.Theme }
-type taskNotificationEvent struct{ notification channel.Notification }
+type notificationEvent struct{ notification channel.Notification }
 type notificationPauseMsg struct{ sequence uint64 }
 type notificationAckMsg struct {
 	ids   []string
@@ -143,8 +142,6 @@ type Options struct {
 	LoadThemes         func() ([]theme.Theme, error)
 	RuntimeEvents      <-chan core.RuntimeStatus
 	InitialRuntime     core.RuntimeStatus
-	DurableWorkEvents  <-chan core.DurableWorkCounts
-	InitialDurableWork core.DurableWorkCounts
 	UpdateCheck        func(context.Context) (bool, error)
 	UpdateAvailable    bool
 	UpdateCheckedAt    time.Time
@@ -209,8 +206,6 @@ type model struct {
 	responseCommit           int
 	working                  bool
 	mainAgentActivity        int
-	recoveryActivity         int
-	recoveryTerminalAhead    int
 	logoSpinner              bubblespinner.Model
 	logoAnimation            logoAnimationMode
 	logoGeneration           uint64
@@ -240,8 +235,6 @@ type model struct {
 	titles                   <-chan string
 	runtimeEvents            <-chan core.RuntimeStatus
 	runtimeStatus            core.RuntimeStatus
-	durableWorkEvents        <-chan core.DurableWorkCounts
-	durableWork              core.DurableWorkCounts
 	updateCheck              func(context.Context) (bool, error)
 	updateAvailable          bool
 	updateCheckedAt          time.Time
@@ -502,8 +495,6 @@ func Run(ctx context.Context, title string, handler channel.Handler, commands []
 		titles:               options.TitleEvents,
 		runtimeEvents:        options.RuntimeEvents,
 		runtimeStatus:        options.InitialRuntime,
-		durableWorkEvents:    options.DurableWorkEvents,
-		durableWork:          options.InitialDurableWork,
 		updateCheck:          options.UpdateCheck,
 		updateAvailable:      options.UpdateAvailable,
 		updateCheckedAt:      options.UpdateCheckedAt,
@@ -740,7 +731,7 @@ func (m model) waitEvent() tea.Cmd {
 		case notice := <-m.notices:
 			return noticeEvent{notice: notice}
 		case notification := <-m.notifications:
-			return taskNotificationEvent{notification: notification}
+			return notificationEvent{notification: notification}
 		case event := <-m.conversationEvents:
 			return uiEvent{event: event, conversation: true}
 		case title := <-m.titles:
@@ -749,8 +740,6 @@ func (m model) waitEvent() tea.Cmd {
 			return themeEvent{theme: value}
 		case status := <-m.runtimeEvents:
 			return runtimeEvent{status: status}
-		case counts := <-m.durableWorkEvents:
-			return durableWorkEvent{counts: counts}
 		case <-m.ctx.Done():
 			return tea.Quit()
 		}
@@ -1113,19 +1102,9 @@ func (m model) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = event.Text
 		case core.EventActivity:
 			wasWorking := m.working
-			if value.conversation && event.Active {
-				m.recoveryActivity++
+			if event.Active {
 				m.mainAgentActivity++
-			} else if value.conversation && m.recoveryActivity > 0 {
-				m.recoveryActivity--
-				if m.recoveryTerminalAhead > 0 {
-					m.recoveryTerminalAhead--
-				} else if m.mainAgentActivity > 0 {
-					m.mainAgentActivity--
-				}
-			} else if !value.conversation && event.Active {
-				m.mainAgentActivity++
-			} else if !value.conversation && m.mainAgentActivity > 0 {
+			} else if m.mainAgentActivity > 0 {
 				m.mainAgentActivity--
 			}
 			m.working = m.mainAgentActivity > 0
@@ -1163,13 +1142,7 @@ func (m model) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.deferredUIEvents = m.deferredUIEvents[1:]
 			commands = append(commands, func() tea.Msg { return uiEvent{event: event, replay: true} })
 		}
-	case taskNotificationEvent:
-		if value.notification.Recovery {
-			m.appendRecoveredResponse(value.notification)
-			m.refresh()
-			commands = append(commands, m.waitEvent())
-			break
-		}
+	case notificationEvent:
 		m.pendingNotifications = append(m.pendingNotifications, value.notification)
 		if !m.working {
 			m.flushNotifications()
@@ -1306,9 +1279,6 @@ func (m model) update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if command := m.syncLogoAnimation(); command != nil {
 			commands = append(commands, command)
 		}
-		commands = append(commands, m.waitEvent())
-	case durableWorkEvent:
-		m.durableWork = value.counts
 		commands = append(commands, m.waitEvent())
 	case screenSaveResult:
 		if m.screen == nil || m.screen.ID != value.screenID || value.generation != 0 && value.generation != m.screenGeneration {
@@ -1755,43 +1725,6 @@ func (m *model) flushNotificationPrefix(count int) {
 		m.appendTranscript(transcriptEntry{role: "assistant", text: notification.Text})
 	}
 	m.pendingNotifications = m.pendingNotifications[count:]
-}
-
-// appendRecoveredResponse reconciles a durable recovery terminal without
-// touching the response buffer of a newer foreground turn. Recovery entries
-// are not task notifications and therefore never enter the acknowledgement
-// protocol.
-func (m *model) appendRecoveredResponse(notification channel.Notification) {
-	followingTail := m.shouldFollowTail()
-	// The durable terminal and polled activity count deliberately travel over
-	// separate reconnect-safe paths. Visibly settle one already-observed
-	// recovery reference now so its placeholder cannot outlive the answer, but
-	// retain the authoritative observed count and credit its later inactive
-	// edge. Otherwise overlapping recoveries would both be settled by one
-	// terminal followed by that terminal's delayed inactive edge.
-	if m.recoveryActivity > m.recoveryTerminalAhead {
-		m.recoveryTerminalAhead++
-		if m.mainAgentActivity > 0 {
-			m.mainAgentActivity--
-		}
-		m.working = m.mainAgentActivity > 0
-	}
-	role := "assistant"
-	if notification.Error {
-		role = "error"
-	}
-	m.appendTranscript(transcriptEntry{role: role, text: notification.Text})
-	if !followingTail {
-		m.newMessages++
-		m.status = newMessageStatus(m.newMessages)
-		return
-	}
-	m.newMessages = 0
-	if m.working {
-		m.status = "Harness working"
-	} else {
-		m.status = "Ready"
-	}
 }
 
 func newMessageStatus(count int) string {
@@ -3292,8 +3225,6 @@ func (m model) headerView(width int) string {
 	segments := []string{
 		m.connectionSegment("telegram", "TG"),
 		m.connectionSegment("whatsapp", "WA"),
-		m.styles.status.Background(m.styles.header.GetBackground()).Render(runtimeCount(m.durableWork.Goals, "goal")),
-		m.styles.status.Background(m.styles.header.GetBackground()).Render(runtimeCount(m.durableWork.Tasks, "task")),
 		m.styles.status.Background(m.styles.header.GetBackground()).Render(runtimeCount(m.runtimeStatus.Jobs, "job")),
 		m.styles.status.Background(m.styles.header.GetBackground()).Render(runtimeCount(m.runtimeStatus.Logs, "log")),
 	}

@@ -2,6 +2,8 @@ package localapi
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,8 +48,8 @@ func TestGlobalJobActivityReachesPrimaryAndAttachedTUI(t *testing.T) {
 			if initial.Runtime != state.Runtime || state.Runtime != status.Runtime || state.Runtime.Jobs != registered || state.Runtime.LiveJobs != live {
 				t.Fatalf("registration/poll/status disagree: initial=%#v state=%#v status=%#v", initial.Runtime, state.Runtime, status.Runtime)
 			}
-			if state.ConversationActivity != 0 || state.DurableWork != (core.DurableWorkCounts{}) || status.TurnActive || status.OrchestratorLease != 0 || status.OrchestratorRuns != 0 {
-				t.Fatalf("global job manufactured local work or leases: %#v %#v", state, status)
+			if status.TurnActive {
+				t.Fatalf("global job manufactured local turn activity: %#v %#v", state, status)
 			}
 		}
 	}
@@ -79,7 +81,40 @@ func TestGlobalJobActivityReachesPrimaryAndAttachedTUI(t *testing.T) {
 		}
 	}
 	state, err := clients[1].State(ctx)
-	if err != nil || state.DurableWork != (core.DurableWorkCounts{Tasks: 1, Goals: 1}) || state.Runtime.LiveJobs != 0 {
-		t.Fatalf("queued task/passive goal manufactured activity: %#v, %v", state, err)
+	status, statusErr := clients[1].Status(ctx, "idle-displayed")
+	if err != nil || statusErr != nil || state.Runtime.Jobs != 0 || state.Runtime.LiveJobs != 0 || status.TurnActive {
+		t.Fatalf("legacy task/goal files manufactured activity: state=%#v status=%#v state_error=%v status_error=%v", state, status, err, statusErr)
+	}
+	assertRetiredWorkflowFieldsAbsent(t, clients[1], "/v1/state")
+	assertRetiredWorkflowFieldsAbsent(t, clients[1], "/v1/status?conversation=idle-displayed")
+}
+
+// assertRetiredWorkflowFieldsAbsent fetches one authenticated state or status
+// payload through the ordinary client transport and verifies the retired
+// task/goal workflow fields never reappear on the wire.
+func assertRetiredWorkflowFieldsAbsent(t *testing.T, client *Client, path string) {
+	t.Helper()
+	response, err := client.request(context.Background(), http.MethodGet, path, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer response.Body.Close()
+	if err := responseError(response); err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("GET %s decode: %v", path, err)
+	}
+	for _, field := range []string{
+		"durable_work", "work_count_diagnostics",
+		"orchestrator_leases", "orchestrator_dispatches",
+		"tasks_active", "tasks_waiting", "goals_active",
+		"heartbeat_state", "next_heartbeat_at", "scheduled_goal_checkpoints",
+		"conversation_recovery",
+	} {
+		if _, ok := payload[field]; ok {
+			t.Fatalf("GET %s still exposes retired workflow field %q", path, field)
+		}
 	}
 }

@@ -10,9 +10,7 @@ import (
 
 func TestTelegramCommandsExactCatalog(t *testing.T) {
 	want := []core.SlashCommand{
-		{Value: "/status", Usage: "/status", Description: "Show work, runtime, channel, and orchestrator state"},
-		{Value: "/tasks", Usage: "/tasks", Description: "List open tasks or select a semantic view"},
-		{Value: "/goals", Usage: "/goals", Description: "List open goals or select a semantic view"},
+		{Value: "/status", Usage: "/status", Description: "Show runtime, channel, and harness state"},
 		{Value: "/jobs", Usage: "/jobs", Description: "List running agent jobs"},
 		{Value: "/job", Usage: "/job", Description: "Inspect or control an agent job by number"},
 		{Value: "/log", Usage: "/log", Description: "Inspect, search, or clear captured runtime logs"},
@@ -29,8 +27,7 @@ func TestTelegramCommandsExactCatalog(t *testing.T) {
 		{Value: "/stop", Usage: "/stop", Description: "Stop the active execution for this chat"},
 		{Value: "/restart", Usage: "/restart", Description: "Restart Spynel and restore saved state"},
 		{Value: "/update", Usage: "/update", Description: "Update and restart all instances of this installation"},
-		{Value: "/trigger", Usage: "/trigger", Description: "List or start a triggerable background process"},
-		{Value: "/cleanup", Usage: "/cleanup", Description: "Remove old conversations and job archives; archive old terminal tasks"},
+		{Value: "/cleanup", Usage: "/cleanup", Description: "Remove old conversations and job archives"},
 		{Value: "/extension", Usage: "/extension", Description: "List or manage installed project extensions"},
 		{Value: "/welcome", Usage: "/welcome", Description: "Show the Spynel welcome guide"},
 		{Value: "/whatsapp", Usage: "/whatsapp", Description: "Inspect or change WhatsApp configuration"},
@@ -81,7 +78,7 @@ func TestTelegramCommandsExclusionsAndPresence(t *testing.T) {
 	for _, command := range TelegramCommands() {
 		values[command.Value] = true
 	}
-	for _, excluded := range []string{"/task", "/goal", "/telegram", "/quit", "/primary", "/new", "/resume"} {
+	for _, excluded := range []string{"/task", "/goal", "/tasks", "/goals", "/trigger", "/telegram", "/quit", "/primary", "/new", "/resume"} {
 		if values[excluded] {
 			t.Errorf("command %q must not appear in the Telegram menu", excluded)
 		}
@@ -105,7 +102,7 @@ func TestTelegramCommandsReturnsDefensiveCopy(t *testing.T) {
 	if len(second) != len(telegramCommands) {
 		t.Fatalf("TelegramCommands() length = %d after mutation, want %d", len(second), len(telegramCommands))
 	}
-	if second[0].Value != "/status" || second[0].Description != "Show work, runtime, channel, and orchestrator state" {
+	if second[0].Value != "/status" || second[0].Description != "Show runtime, channel, and harness state" {
 		t.Fatalf("first entry = %#v after mutation, want the canonical /status entry", second[0])
 	}
 	for _, command := range second {

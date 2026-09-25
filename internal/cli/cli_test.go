@@ -377,139 +377,6 @@ func TestBareFailureLoggingDoesNotAdoptAncestorBeforeChoice(t *testing.T) {
 	}
 }
 
-func TestWorkflowListAliasPreservesSharedAndListOptions(t *testing.T) {
-	for _, test := range []struct {
-		input []string
-		want  []string
-	}{
-		{input: []string{"--limit", "50"}, want: []string{"open", "--limit", "50"}},
-		{input: []string{"--config", "workspace.yml", "--days", "14", "--detail"}, want: []string{"--config", "workspace.yml", "open", "--days", "14", "--detail"}},
-		{input: []string{"--json", "waiting", "--limit", "2"}, want: []string{"--json", "waiting", "--limit", "2"}},
-		{input: []string{"review", "--days", "7"}, want: []string{"review", "--days", "7"}},
-		{input: []string{"failed", "--detail"}, want: []string{"failed", "--detail"}},
-	} {
-		if got := workflowListAliasArgs(test.input); strings.Join(got, "\x00") != strings.Join(test.want, "\x00") {
-			t.Errorf("workflowListAliasArgs(%q) = %q, want %q", test.input, got, test.want)
-		}
-	}
-}
-
-func TestWorkflowListAliasesAreDocumentedForExternalPrograms(t *testing.T) {
-	for _, want := range []string{
-		"spynel tasks [flags] [VIEW]",
-		"spynel goals [flags] [VIEW]",
-		"open|recent|active|review|waiting|done|failed|all",
-		"--config PATH",
-		"--conversation NAME",
-		"--days N",
-		"--limit N",
-		"--detail",
-		"shared response event as NDJSON",
-	} {
-		if !strings.Contains(helpText, want) {
-			t.Fatalf("CLI help does not expose %q:\n%s", want, helpText)
-		}
-	}
-}
-
-func TestInstructionsCommandReportsValidationWithoutContents(t *testing.T) {
-	root := t.TempDir()
-	if err := workspace.Init(root, false); err != nil {
-		t.Fatal(err)
-	}
-	cfgPath := config.PathForRoot(root)
-	cfg, _ := config.Load(cfgPath)
-	secret := "do-not-print-in-status"
-	if err := os.WriteFile(cfg.StatePath("instructions", "agent-chat.md"), []byte(secret), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var output strings.Builder
-	if err := runInstructionsCommand([]string{"--config", cfgPath}, &output); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(output.String(), secret) || !strings.Contains(output.String(), "chat: .spynel/instructions/agent-chat.md — valid") {
-		t.Fatalf("instruction inspection output = %q", output.String())
-	}
-}
-
-func TestInstructionsCommandRejectsEscapingInstructionsDirectory(t *testing.T) {
-	root := t.TempDir()
-	if err := workspace.Init(root, false); err != nil {
-		t.Fatal(err)
-	}
-	cfgPath := config.PathForRoot(root)
-	instructionsPath := filepath.Join(root, ".spynel", "instructions")
-	outsidePath := filepath.Join(t.TempDir(), "external-instructions")
-	if err := os.Rename(instructionsPath, outsidePath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outsidePath, instructionsPath); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	var output strings.Builder
-	err := runInstructionsCommand([]string{"--config", cfgPath}, &output)
-	if err == nil || !strings.Contains(err.Error(), "unsafe or invalid") {
-		t.Fatalf("symlinked instructions command error = %v", err)
-	}
-	if strings.Count(output.String(), "invalid (.spynel/instructions path must not be a symbolic link)") != 5 {
-		t.Fatalf("symlinked instructions command output = %q", output.String())
-	}
-}
-
-func TestTaskInspectShowsEffectiveFailSafeReviewPolicy(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		front string
-		want  []string
-	}{
-		{name: "explicit false", front: "review_required: false\n", want: []string{"Review required: false"}},
-		{name: "missing", front: "id: task\n", want: []string{"Review required: true"}},
-		{name: "malformed", front: "review_required: nope\n", want: []string{"Review required: true", "Policy warning:", "treated as review required"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "task.md")
-			if err := os.WriteFile(path, []byte("---\n"+test.front+"---\n# Task\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			var output bytes.Buffer
-			if err := inspectTaskPolicy(path, &output); err != nil {
-				t.Fatal(err)
-			}
-			for _, want := range test.want {
-				if !strings.Contains(output.String(), want) {
-					t.Fatalf("inspection = %q, missing %q", output.String(), want)
-				}
-			}
-		})
-	}
-}
-
-func TestTaskInspectAppliesWorkspaceReviewMode(t *testing.T) {
-	root := t.TempDir()
-	if err := workspace.Init(root, false); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(config.PathForRoot(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Harness.Reviews = config.TaskReviewsNever
-	if err := config.Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(cfg.StatePath("tasks", "todo"), "inspect.md")
-	if err := os.WriteFile(path, []byte("---\nid: task\nreview_required: true\n---\n# Task\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var output bytes.Buffer
-	if err := inspectTaskPolicy(path, &output); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(output.String(), "Configured task review mode: never") || !strings.Contains(output.String(), "Review required: false") {
-		t.Fatalf("inspection = %q", output.String())
-	}
-}
-
 func TestNotifyCommandUsesDurableHistoryWithoutHarness(t *testing.T) {
 	root := t.TempDir()
 	if err := workspace.Init(root, false); err != nil {
@@ -839,6 +706,19 @@ func TestSendCommandValidatesScriptableArguments(t *testing.T) {
 	}
 }
 
+func TestRetiredCommandsAreUnknownAndUndocumented(t *testing.T) {
+	for _, command := range []string{"instructions", "tasks", "goals", "task", "goal"} {
+		if err := run([]string{command}, "test"); err == nil || !strings.Contains(err.Error(), "unknown command") {
+			t.Fatalf("retired command %q = %v", command, err)
+		}
+	}
+	for _, copy := range []string{"spynel instructions", "spynel tasks", "spynel goals"} {
+		if strings.Contains(helpText, copy) {
+			t.Fatalf("retired command copy %q remains in CLI help:\n%s", copy, helpText)
+		}
+	}
+}
+
 func TestCLIMessageSupportsStdinStreamingAndJSONEvents(t *testing.T) {
 	text, err := cliMessageText(nil, true, strings.NewReader("first line\nsecond line\n"))
 	if err != nil || text != "first line\nsecond line" {
@@ -979,10 +859,6 @@ func TestStatusCLIEmitsStructuredNonSecretState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitingPath := filepath.Join(root, ".spynel", "tasks", "waiting", "waiting.md")
-	if err := os.WriteFile(waitingPath, []byte("---\nid: waiting\nstatus: waiting\n---\n# Waiting\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	var output bytes.Buffer
 	if err := runStatusCLICommand([]string{"--config", cfg.Path, "--conversation", "automation", "--json"}, "test", &output); err != nil {
 		t.Fatal(err)
@@ -993,9 +869,6 @@ func TestStatusCLIEmitsStructuredNonSecretState(t *testing.T) {
 	}
 	if status.Title == "" || status.Sandbox == "" || status.HarnessState == "" || len(status.Connections) != 2 {
 		t.Fatalf("CLI status = %#v", status)
-	}
-	if status.TasksActive != 1 || status.TasksWaiting != 1 {
-		t.Fatalf("CLI durable waiting count = active %d waiting %d", status.TasksActive, status.TasksWaiting)
 	}
 	if strings.Contains(output.String(), "token") {
 		t.Fatalf("CLI status exposed configuration secrets: %s", output.String())
@@ -1010,9 +883,14 @@ func TestStatusCLIEmitsStructuredNonSecretState(t *testing.T) {
 	if _, ok := fields["thread"]; ok {
 		t.Fatalf("structured CLI status retained thread: %s", output.String())
 	}
-	for _, field := range []string{"tasks_active", "tasks_waiting", "goals_active", "heartbeat_state"} {
+	for _, field := range []string{"runtime", "harness_state", "sandbox"} {
 		if _, ok := fields[field]; !ok {
 			t.Fatalf("structured CLI status is missing %q: %s", field, output.String())
+		}
+	}
+	for _, field := range []string{"tasks_active", "tasks_waiting", "goals_active", "heartbeat_state"} {
+		if _, ok := fields[field]; ok {
+			t.Fatalf("structured CLI status retained retired workflow field %q: %s", field, output.String())
 		}
 	}
 }
@@ -1463,7 +1341,6 @@ func TestOwnerElectionRunsOneServerAndHandsOffOnExit(t *testing.T) {
 	cfg.Harness.Name = ""
 	cfg.Channels.Telegram.Enabled = false
 	cfg.Channels.WhatsApp.Enabled = false
-	cfg.Orchestrator.Enabled = false
 	cfg.Extensions.Enabled = false
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
@@ -1554,7 +1431,6 @@ func TestOwnerElectionPromotesAfterObservedPrimaryBecomesStale(t *testing.T) {
 	cfg.Harness.Name = ""
 	cfg.Channels.Telegram.Enabled = false
 	cfg.Channels.WhatsApp.Enabled = false
-	cfg.Orchestrator.Enabled = false
 	cfg.Extensions.Enabled = false
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
@@ -1616,7 +1492,6 @@ func TestPrimaryCommandHandsOwnershipToRequestingTUI(t *testing.T) {
 	cfg.Harness.Name = ""
 	cfg.Channels.Telegram.Enabled = false
 	cfg.Channels.WhatsApp.Enabled = false
-	cfg.Orchestrator.Enabled = false
 	cfg.Extensions.Enabled = false
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)

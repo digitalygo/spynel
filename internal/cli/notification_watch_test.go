@@ -9,7 +9,7 @@ import (
 	"github.com/digitalygo/spynel/internal/history"
 )
 
-func TestWatchTaskNotificationsRetriesPartialRecoveryLine(t *testing.T) {
+func TestWatchNotificationsRetriesPartialNotificationLine(t *testing.T) {
 	store := history.New(t.TempDir())
 	if _, err := store.Ensure("tui", "partial"); err != nil {
 		t.Fatal(err)
@@ -20,12 +20,12 @@ func TestWatchTaskNotificationsRetriesPartialRecoveryLine(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	events := watchTaskNotifications(ctx, path, offset)
+	events := watchNotifications(ctx, path, offset)
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	line := []byte(`{"role":"assistant","sender":"Spy","content":"partial recovered","recovery":true}` + "\n")
+	line := []byte(`{"role":"notification_pending","sender":"Spy","content":"partial notice","event_id":"n-partial"}` + "\n")
 	if _, err := file.Write(line[:len(line)/2]); err != nil {
 		t.Fatal(err)
 	}
@@ -38,15 +38,15 @@ func TestWatchTaskNotificationsRetriesPartialRecoveryLine(t *testing.T) {
 	}
 	select {
 	case event := <-events:
-		if event.Text != "partial recovered" || !event.Recovery {
-			t.Fatalf("partial recovery event = %#v", event)
+		if event.ID != "n-partial" || event.Text != "partial notice" {
+			t.Fatalf("partial notification event = %#v", event)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("partial recovery line was skipped")
+		t.Fatal("partial notification line was skipped")
 	}
 }
 
-func TestWatchTaskNotificationsSurfacesLiveRecoveryTerminal(t *testing.T) {
+func TestWatchNotificationsSurfacesExplicitNotificationIdentity(t *testing.T) {
 	store := history.New(t.TempDir())
 	if _, err := store.Ensure("tui", "local"); err != nil {
 		t.Fatal(err)
@@ -60,21 +60,21 @@ func TestWatchTaskNotificationsSurfacesLiveRecoveryTerminal(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	events := watchTaskNotifications(ctx, path, offset)
-	if _, err := store.Append("tui", "local", history.Entry{Role: "assistant", Sender: "Spy", Content: "recovered visibly", Terminal: true, Recovery: true}); err != nil {
+	events := watchNotifications(ctx, path, offset)
+	if _, err := store.Append("tui", "local", history.Entry{Role: "notification_pending", Sender: "Spy", Content: "queued notice", EventID: "n1"}); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case event := <-events:
-		if event.Text != "recovered visibly" || event.ID != "" || !event.Recovery || event.Error {
-			t.Fatalf("recovery event = %#v", event)
+		if event.ID != "n1" || event.Text != "queued notice" {
+			t.Fatalf("notification event = %#v", event)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("live TUI watcher did not surface recovery terminal")
+		t.Fatal("live TUI watcher did not surface the explicit notification")
 	}
 }
 
-func TestWatchTaskNotificationsMarksRecoveryErrorsWithoutAcknowledgementIdentity(t *testing.T) {
+func TestWatchNotificationsSurfacesIdleAssistantNotification(t *testing.T) {
 	store := history.New(t.TempDir())
 	if _, err := store.Ensure("tui", "local"); err != nil {
 		t.Fatal(err)
@@ -85,21 +85,53 @@ func TestWatchTaskNotificationsMarksRecoveryErrorsWithoutAcknowledgementIdentity
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	events := watchTaskNotifications(ctx, path, offset)
-	if _, err := store.Append("tui", "local", history.Entry{Role: "error", Sender: "Spy", Content: "provider interrupted", Terminal: true, Recovery: true}); err != nil {
+	events := watchNotifications(ctx, path, offset)
+	if _, err := store.Append("tui", "local", history.Entry{Role: "assistant", Sender: "Spy", Content: "idle notice", EventID: "n2"}); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case event := <-events:
-		if event.Text != "provider interrupted" || event.ID != "" || !event.Recovery || !event.Error {
-			t.Fatalf("recovery error = %#v", event)
+		if event.ID != "n2" || event.Text != "idle notice" {
+			t.Fatalf("idle notification event = %#v", event)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("live TUI watcher did not surface recovery error")
+		t.Fatal("live TUI watcher did not surface the idle notification")
 	}
 }
 
-func TestRestartHistorySnapshotAndRecoveredTailHaveOneStableOrder(t *testing.T) {
+// Entries without a durable event identity cover ordinary streamed replies and
+// retired runtime-authored recovery terminals; neither is a notification and
+// neither may be consumed by the live watcher.
+func TestWatchNotificationsIgnoresEntriesWithoutNotificationIdentity(t *testing.T) {
+	store := history.New(t.TempDir())
+	if _, err := store.Ensure("tui", "local"); err != nil {
+		t.Fatal(err)
+	}
+	_, path, offset, err := store.RecentEntriesSnapshot("tui", "local", 10, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := watchNotifications(ctx, path, offset)
+	for _, entry := range []history.Entry{
+		{Role: "assistant", Content: "ordinary streamed reply"},
+		{Role: "user", Content: "ordinary question"},
+		{Role: "assistant", Sender: "Spy", Content: "retired recovered answer", Terminal: true},
+		{Role: "error", Sender: "Spy", Content: "retired recovery failure", Terminal: true},
+	} {
+		if _, err := store.Append("tui", "local", entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("watcher consumed a non-notification entry: %#v", event)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestRestartHistorySnapshotAndLiveNotificationHaveOneStableOrder(t *testing.T) {
 	store := history.New(t.TempDir())
 	for _, entry := range []history.Entry{
 		{Role: "user", Content: "ordinary question"},
@@ -118,20 +150,20 @@ func TestRestartHistorySnapshotAndRecoveredTailHaveOneStableOrder(t *testing.T) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	events := watchTaskNotifications(ctx, path, offset)
-	if _, err := store.Append("tui", "restart", history.Entry{Role: "assistant", Sender: "Spy", Content: "recovered answer", Terminal: true, Recovery: true}); err != nil {
+	events := watchNotifications(ctx, path, offset)
+	if _, err := store.Append("tui", "restart", history.Entry{Role: "notification_pending", Sender: "Spy", Content: "queued notice", EventID: "n3"}); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case event := <-events:
-		if len(initial) != 5 || initial[0].Content != "ordinary question" || initial[1].Content != "/restart" || initial[2].Content != "Restarting Spynel..." || initial[3].Content != "/restart" || initial[4].Content != "Restarting Spynel..." || event.Text != "recovered answer" || !event.Recovery {
-			t.Fatalf("restart/recovery live sequence = initial %#v event %#v", initial, event)
+		if len(initial) != 5 || initial[0].Content != "ordinary question" || initial[1].Content != "/restart" || initial[2].Content != "Restarting Spynel..." || initial[3].Content != "/restart" || initial[4].Content != "Restarting Spynel..." || event.ID != "n3" || event.Text != "queued notice" {
+			t.Fatalf("restart/notification live sequence = initial %#v event %#v", initial, event)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("recovered terminal did not cross the startup snapshot boundary")
+		t.Fatal("live notification did not cross the startup snapshot boundary")
 	}
 	reopened, _, _, err := store.RecentEntriesSnapshot("tui", "restart", 20, 4000)
-	if err != nil || len(reopened) != 6 || reopened[5].Content != "recovered answer" {
+	if err != nil || len(reopened) != 6 || reopened[5].Content != "queued notice" {
 		t.Fatalf("reopened sequence = %#v, %v", reopened, err)
 	}
 }

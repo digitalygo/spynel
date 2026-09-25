@@ -315,6 +315,17 @@ type ConversationContextProvider interface {
 	ProvidesConversationContext(key string) bool
 }
 
+// NativeConversationInputProvider is an optional capability that reports
+// whether the harness receives the raw accepted conversation text for a
+// session key and expands its own native skills, prompt templates, and
+// extension commands. Implementations report false for control and unknown
+// keys, meaning every session key outside the ordinary
+// `chat:<channel>:<conversation>` grammar, so callers keep the
+// provider-neutral bounded-context prompt.
+type NativeConversationInputProvider interface {
+	NativeConversationInput(sessionKey string) bool
+}
+
 type Harness interface {
 	Start(context.Context) error
 	Send(context.Context, string, string, core.Emit) (threadID string, steered bool, err error)

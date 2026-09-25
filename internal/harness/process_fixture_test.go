@@ -103,6 +103,12 @@ func portableHarnessFixture(t *testing.T, mode string) (command, cwd, logPath st
 	root := filepath.Join(t.TempDir(), "portable fixture 世界")
 	toolsDir := filepath.Join(root, "tool bin café")
 	cwd = filepath.Join(root, "work tree λ")
+	// The returned working directory models a real Spynel workspace, which
+	// initialization always creates private, so the Telegram note
+	// runtime-directory trust validation accepts it like production state.
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +176,7 @@ func runHarnessFixture(mode string) int {
 		return runCodexFixture(mode)
 	case "claude-stream", "claude-steer", "claude-text", "claude-interrupt", "claude-help-missing-flag", "claude-init-changed-event", "claude-terminal-error", "claude-result-nonzero":
 		return runClaudeFixture(mode)
-	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath", "pi-session-named", "pi-retry-success", "pi-all-failed", "pi-success-then-failed", "pi-no-message":
+	case "pi-lifecycle", "pi-steer", "pi-interrupt", "pi-state-missing-session", "pi-model-capabilities", "pi-off-default", "pi-extension-ui", "pi-import-changing", "pi-compact-without-estimate", "pi-compaction-events", "pi-import-preexisting", "pi-import-nopath", "pi-session-named", "pi-retry-success", "pi-all-failed", "pi-success-then-failed", "pi-no-message", "pi-native-commands", "pi-native-commands-malformed", "pi-native-commands-streaming-state":
 		return runPiFixture(mode)
 	case "acp-lifecycle", "acp-interrupt", "acp-version-mismatch", "acp-session-error":
 		return runACPFixture(mode)
@@ -186,12 +192,17 @@ func runPiFixture(mode string) int {
 		return 0
 	}
 	type request struct {
-		ID       string          `json:"id"`
-		Type     string          `json:"type"`
-		Message  json.RawMessage `json:"message"`
-		Provider string          `json:"provider"`
-		ModelID  string          `json:"modelId"`
+		ID                string          `json:"id"`
+		Type              string          `json:"type"`
+		Message           json.RawMessage `json:"message"`
+		StreamingBehavior string          `json:"streamingBehavior"`
+		Provider          string          `json:"provider"`
+		ModelID           string          `json:"modelId"`
 	}
+	// getStates counts the state queries of this process so mode-scoped
+	// behavior can differ between startup negotiation and a later settlement
+	// query within the same live provider process.
+	getStates := 0
 	args := os.Args[1:]
 	currentModel := "model-a"
 	if mode == "pi-off-default" {
@@ -267,6 +278,14 @@ func runPiFixture(mode string) int {
 		appendFixtureLog(map[string]any{"kind": "request", "method": message.Type, "params": json.RawMessage(scanner.Bytes())})
 		switch message.Type {
 		case "get_state":
+			getStates++
+			if mode == "pi-native-commands-streaming-state" && getStates > 1 {
+				// The settlement-path state query sees a still-streaming session,
+				// so the no-run settlement must stand down and the ordinary
+				// agent_settled lifecycle remains authoritative.
+				respond(message, map[string]any{"isStreaming": true})
+				break
+			}
 			// pi-import-nopath simulates a provider that creates the fork file
 			// and then exits negotiation without ever reporting its path.
 			if mode == "pi-import-nopath" && forkPath != "" {
@@ -344,7 +363,38 @@ func runPiFixture(mode string) int {
 				levels = []string{"off", "medium", "xhigh", "max"}
 			}
 			respond(message, map[string]any{"levels": levels})
+		case "get_commands":
+			if mode == "pi-native-commands-malformed" {
+				// Valid on the wire but unusable for command recognition, so the
+				// client-side decode must fail and keep the ordinary lifecycle.
+				respond(message, map[string]any{"commands": "malformed"})
+				break
+			}
+			respond(message, map[string]any{"commands": []any{
+				map[string]any{"name": "extcmd", "description": "Fixture extension command", "source": "extension"},
+				map[string]any{"name": "fix-tests", "description": "Fixture prompt template", "source": "prompt"},
+				map[string]any{"name": "skill:review", "description": "Fixture skill", "source": "skill"},
+			}})
 		case "prompt":
+			var text string
+			_ = json.Unmarshal(message.Message, &text)
+			if mode == "pi-native-commands" {
+				if message.StreamingBehavior != "steer" && strings.HasPrefix(text, "/extcmd") {
+					if strings.HasPrefix(text, "/extcmd fail") {
+						write(map[string]any{"id": message.ID, "type": "response", "command": "prompt", "success": false, "error": "Fixture rejected the native command"})
+						break
+					}
+					// A recognized no-run extension command: fire-and-forget UI
+					// feedback and an accepted prompt response, with no agent
+					// run and therefore no agent lifecycle events.
+					write(map[string]any{"type": "extension_ui_request", "id": "native-notify", "method": "notify", "message": "extcmd fixture feedback", "notifyType": "info"})
+					respond(message, map[string]any{})
+					break
+				}
+				if text == "/cancel me" {
+					time.Sleep(300 * time.Millisecond)
+				}
+			}
 			respond(message, map[string]any{})
 			if mode == "pi-no-message" {
 				write(map[string]any{"type": "agent_end"})
@@ -353,6 +403,34 @@ func runPiFixture(mode string) int {
 					write(map[string]any{"type": "agent_settled"})
 				}()
 				break
+			}
+			if mode == "pi-native-commands" {
+				if text == "first" {
+					delta("first")
+					break
+				}
+				if message.StreamingBehavior == "steer" {
+					delta(" steered")
+					messageEnd("first steered", "stop")
+					write(map[string]any{"type": "agent_end"})
+					go func() {
+						time.Sleep(80 * time.Millisecond)
+						write(map[string]any{"type": "agent_settled"})
+					}()
+					break
+				}
+				if strings.HasPrefix(text, "/skill:") {
+					messageStart()
+					delta("reviewing ")
+					delta("code")
+					messageEnd("reviewing code", "stop")
+					write(map[string]any{"type": "agent_end"})
+					go func() {
+						time.Sleep(80 * time.Millisecond)
+						write(map[string]any{"type": "agent_settled"})
+					}()
+					break
+				}
 			}
 			messageStart()
 			if mode == "pi-extension-ui" {

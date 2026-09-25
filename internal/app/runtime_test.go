@@ -167,39 +167,6 @@ func TestRuntimeProjectsOnlyAuthoritativeLiveJobs(t *testing.T) {
 	}
 }
 
-func TestDurableTimingSurvivesContinuationAndJobNumberReplacement(t *testing.T) {
-	now := time.Date(2026, 8, 8, 12, 27, 0, 0, time.UTC)
-	first := now.Add(-3*time.Hour - 27*time.Minute)
-	runtime := NewRuntime()
-	runtime.Now = func() time.Time { return now }
-	id := runtime.BeginJobWithDetails("durable", "orchestrator", "markdown", "task.md", JobDetails{
-		Kind: "task", Route: "tasks", DurableFile: "/private/task.md",
-		FirstAssignedAt: first, ProviderIterations: 1, ImplementationAttempts: 4,
-	})
-	if continued := runtime.BeginJobWithDetails("durable", "orchestrator", "markdown", "task.md", JobDetails{
-		Kind: "task", Route: "tasks", DurableFile: "/private/task.md",
-		FirstAssignedAt: first, ProviderIterations: 2, ImplementationAttempts: 3,
-	}); continued != id {
-		t.Fatalf("continuation job ID = %d, want %d", continued, id)
-	}
-	runtime.UpdateJobDurableTiming(id, first.Add(time.Hour), 1)
-	if output := formatJobsAt(runtime.Jobs(), now); !strings.Contains(output, "3h27m 2▶ 4↻ · starting · orchestrator") {
-		t.Fatalf("durable continuation timing = %s", output)
-	}
-	runtime.EndJob(id)
-	now = now.Add(5 * time.Minute)
-	replacement := runtime.BeginJobWithDetails("durable", "orchestrator", "markdown", "task.md", JobDetails{
-		Kind: "task", Route: "tasks", DurableFile: "/private/task.md",
-		FirstAssignedAt: first, ProviderIterations: 3, ImplementationAttempts: 5,
-	})
-	if replacement == id {
-		t.Fatalf("replacement reused job ID %d", id)
-	}
-	if output := formatJobsAt(runtime.Jobs(), now); !strings.Contains(output, "3h32m 3▶ 5↻") {
-		t.Fatalf("replacement durable timing = %s", output)
-	}
-}
-
 func TestShortDurationUsesCompactStableUnits(t *testing.T) {
 	cases := map[time.Duration]string{
 		48 * time.Second:               "48s",
@@ -339,76 +306,12 @@ func TestFallbackRunningTransitionCannotOverwriteReconnect(t *testing.T) {
 	}
 }
 
-func TestOrchestratorReconnectRestorationAndAwaitingTransition(t *testing.T) {
-	runtime := NewRuntime()
-	id := runtime.BeginJob("orchestrator", "orchestrator", "markdown", "task.md")
-	runtime.UpdateJobFromLease(id, "processing", "implementation", "", time.Now().UTC(), 0)
-	runtime.UpdateJob(id, core.ExecutionStatus{State: "reconnecting", ReconnectAttempt: 1, ReconnectTotal: 3})
-	runtime.UpdateJobFromLease(id, "processing", "implementation", "", time.Now().UTC(), 0)
-	if job, _ := runtime.Job(id); job.Execution != JobReconnecting {
-		t.Fatalf("lease falsely restored connection: %#v", job)
-	}
-	runtime.UpdateJob(id, core.ExecutionStatus{State: "running"})
-	if job, _ := runtime.Job(id); job.Execution != JobRunning {
-		t.Fatalf("provider restoration not applied: %#v", job)
-	}
-	runtime.UpdateJobFromLease(id, "awaiting_transition", "implementation", "", time.Now().UTC(), 0)
-	if job, _ := runtime.Job(id); job.Execution != JobAwaitingTransition {
-		t.Fatalf("awaiting transition not retained: %#v", job)
-	}
-	runtime.UpdateJob(id, core.ExecutionStatus{State: "running"})
-	if job, _ := runtime.Job(id); job.Execution != JobAwaitingTransition {
-		t.Fatalf("late provider event resumed awaiting transition: %#v", job)
-	}
-	runtime.UpdateJobFromLease(id, "processing", "implementation", "", time.Now().UTC().Add(time.Second), 0)
-	if job, _ := runtime.Job(id); job.Execution != JobRunning {
-		t.Fatalf("fresh continuation lease did not resume transition: %#v", job)
-	}
-}
-
 func TestJobStatusDetailRedactsCrossPlatformAbsolutePaths(t *testing.T) {
 	for _, path := range []string{`/private/work/file.go`, `C:\private\file.go`, `\\server\share\secret.txt`, `\\?\C:\private\secret.txt`} {
 		got := boundJobStatusDetail("open " + path)
 		if strings.Contains(got, path) || !strings.Contains(got, "[PATH]") {
 			t.Fatalf("path %q not redacted: %q", path, got)
 		}
-	}
-}
-
-func TestLeaseStatesMapToCanonicalExecutionStates(t *testing.T) {
-	tests := map[string]JobExecutionState{
-		"claiming": JobStarting, "processing": JobRunning, "recovering": JobRecovering,
-		"awaiting_transition": JobAwaitingTransition, "hook_cancelled": JobCancelling,
-		"error": JobError, "audit": JobAudit, "future-state": JobDegraded,
-	}
-	for lease, want := range tests {
-		if got := executionFromLeaseState(lease); got != want {
-			t.Fatalf("lease %q = %q, want %q", lease, got, want)
-		}
-	}
-}
-
-func TestLeaseUpdatePublishesOneInternallyConsistentSnapshot(t *testing.T) {
-	runtime := NewRuntime()
-	id := runtime.BeginJob("lease", "orchestrator", "markdown", "task.md")
-	for index := 0; index < 100; index++ {
-		runtime.UpdateJobFromLease(id, "recovering", "task_implementation", "", time.Now().UTC(), 4)
-		job, _ := runtime.Job(id)
-		if job.Execution != JobRecovering || job.LeaseState != "recovering" || job.LeasePhase != "task_implementation" || job.RecoveryCount != 4 {
-			t.Fatalf("inconsistent lease snapshot: %#v", job)
-		}
-		runtime.UpdateJobFromLease(id, "processing", "task_review", "", time.Now().UTC(), 0)
-		job, _ = runtime.Job(id)
-		if job.Execution != JobRunning || job.LeaseState != "processing" || job.LeasePhase != "task_review" || job.RecoveryCount != 0 {
-			t.Fatalf("inconsistent processing snapshot: %#v", job)
-		}
-	}
-	job, _ := runtime.Job(id)
-	newestHeartbeat := job.LeaseHeartbeatAt
-	runtime.UpdateJobFromLease(id, "recovering", "stale_phase", "stale error", newestHeartbeat.Add(-time.Second), 99)
-	job, _ = runtime.Job(id)
-	if job.LeaseState != "processing" || job.LeasePhase != "task_review" || job.RecoveryCount != 0 || !job.LeaseHeartbeatAt.Equal(newestHeartbeat) {
-		t.Fatalf("late lease update mutated canonical snapshot: %#v", job)
 	}
 }
 

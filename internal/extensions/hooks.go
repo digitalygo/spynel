@@ -26,8 +26,6 @@ var supportedHooks = map[string]struct{}{
 	"message.received": {},
 	"harness.before":   {},
 	"harness.after":    {},
-	"task.claimed":     {},
-	"task.completed":   {},
 }
 
 type Manifest struct {
@@ -71,32 +69,21 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 }
 
 type discovered struct {
-	id       string
 	root     string
 	manifest Manifest
 }
 
+// Run executes each matching extension hook in manifest-name order for one
+// event. There is no exactly-once delivery guarantee and no stable event ID:
+// hook invocations may repeat when the caller retries, so consumers should
+// make externally visible effects idempotent.
 func (r Runner) Run(ctx context.Context, hook string, payload map[string]any) (HookOutput, error) {
-	return r.run(ctx, hook, payload, nil, nil)
-}
-
-// RunTracked executes matching hooks using durable successful-completion
-// receipts. A missing receipt deliberately causes retry, so externally visible
-// effects must be persistently deduplicated by the stable event_id in payload.
-func (r Runner) RunTracked(ctx context.Context, hook string, payload map[string]any, completed map[string]bool, onCompleted func(string) error) (HookOutput, error) {
-	return r.run(ctx, hook, payload, completed, onCompleted)
-}
-
-func (r Runner) run(ctx context.Context, hook string, payload map[string]any, completed map[string]bool, onCompleted func(string) error) (HookOutput, error) {
 	result := HookOutput{Payload: clone(payload)}
 	extensions, err := r.discover()
 	if err != nil {
 		return result, err
 	}
 	for _, extension := range extensions {
-		if completed[extension.id] {
-			continue
-		}
 		command := extension.manifest.Hooks[hook]
 		if len(command) == 0 {
 			continue
@@ -144,11 +131,6 @@ func (r Runner) run(ctx context.Context, hook string, payload map[string]any, co
 				result.Message = output.Message
 			}
 		}
-		if onCompleted != nil {
-			if err := onCompleted(extension.id); err != nil {
-				return result, fmt.Errorf("record extension %s hook %s completion: %w", extension.manifest.Name, hook, err)
-			}
-		}
 		if output.Cancel {
 			result.Cancel = true
 			return result, nil
@@ -190,7 +172,7 @@ func (r Runner) discover() ([]discovered, error) {
 				return nil, fmt.Errorf("extension %s declares unsupported hook %q", entry.Name(), hook)
 			}
 		}
-		result = append(result, discovered{id: entry.Name(), root: root, manifest: manifest})
+		result = append(result, discovered{root: root, manifest: manifest})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].manifest.Name < result[j].manifest.Name })
 	return result, nil

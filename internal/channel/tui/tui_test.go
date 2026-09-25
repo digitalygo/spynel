@@ -1897,7 +1897,6 @@ func TestHeaderShowsRuntimeStatusAndFooterOnlyShowsControls(t *testing.T) {
 		{Name: "whatsapp", State: channel.ConnectionError, Detail: "offline"},
 	})
 	m.runtimeStatus = core.RuntimeStatus{Logs: 922, Jobs: 3}
-	m.durableWork = core.DurableWorkCounts{Goals: 0, Tasks: 1}
 
 	view := ansi.Strip(m.View())
 	lines := strings.Split(view, "\n")
@@ -1907,7 +1906,7 @@ func TestHeaderShowsRuntimeStatusAndFooterOnlyShowsControls(t *testing.T) {
 	if !strings.HasPrefix(header, "▀▀○○ Payments") || !strings.HasSuffix(header, "▀▀") || !strings.HasPrefix(footerLine, "▄▄") || !strings.HasSuffix(footerLine, "▄") {
 		t.Fatalf("status ribbons do not surround their items: header=%q footer=%q", header, footerLine)
 	}
-	if !strings.Contains(header, "● TG▀▀▲ WA▀▀0 goals▀▀1 task▀▀3 jobs▀▀922 logs▀▀") {
+	if !strings.Contains(header, "● TG▀▀▲ WA▀▀3 jobs▀▀922 logs▀▀") {
 		t.Fatalf("status header is incomplete: %q", header)
 	}
 	if strings.Contains(header, "Ready") || strings.Contains(header, "local") {
@@ -2080,22 +2079,10 @@ func TestRuntimeEventUpdatesHeaderCounts(t *testing.T) {
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	m := testModel()
 	m.width = 100
-	m.durableWork = core.DurableWorkCounts{Goals: 2, Tasks: 1}
 	next, _ := m.Update(runtimeEvent{status: core.RuntimeStatus{Logs: 12, Jobs: 4}})
 	got := next.(model)
-	if view := got.View(); !strings.Contains(view, "2 goals▀▀1 task▀▀4 jobs▀▀12 logs") || strings.Contains(view, "Log (") || strings.Contains(view, "/jobs") {
+	if view := got.View(); !strings.Contains(view, "4 jobs▀▀12 logs") || strings.Contains(view, "Log (") || strings.Contains(view, "/jobs") {
 		t.Fatalf("runtime status counts are missing or misplaced: %q", view)
-	}
-}
-
-func TestDurableWorkEventUpdatesHeaderCounts(t *testing.T) {
-	m := testModel()
-	m.width = 100
-	m.runtimeStatus = core.RuntimeStatus{Logs: 239, Jobs: 2}
-	next, _ := m.Update(durableWorkEvent{counts: core.DurableWorkCounts{Goals: 0, Tasks: 1}})
-	got := next.(model)
-	if view := ansi.Strip(got.View()); !strings.Contains(view, "0 goals▀▀1 task▀▀2 jobs▀▀239 logs") {
-		t.Fatalf("durable work counts are missing or misplaced: %q", view)
 	}
 }
 
@@ -2134,7 +2121,7 @@ func TestCompactHeaderCountsUseExactGrammar(t *testing.T) {
 		if got := core.CompactCount(test.count); got != test.want {
 			t.Errorf("CompactCount(%d) = %q, want %q", test.count, got, test.want)
 		}
-		for _, singular := range []string{"goal", "task", "job", "log"} {
+		for _, singular := range []string{"job", "log"} {
 			got := runtimeCount(test.count, singular)
 			wantLabel := singular + "s"
 			if test.count == 1 {
@@ -4492,89 +4479,6 @@ func TestMainAgentActivityReplacementDoesNotClearNewerTurn(t *testing.T) {
 	}
 }
 
-func TestRecoveredTerminalReplacesActivityVisiblyWithoutTouchingNewerStream(t *testing.T) {
-	m := testModel()
-	m.transcript = []transcriptEntry{
-		{role: "user", text: "original question"},
-		{role: "user", text: "/restart"},
-		{role: "assistant", text: "Restarting Spynel..."},
-	}
-	next, _ := m.Update(uiEvent{event: core.Event{Kind: core.EventActivity, Active: true}, conversation: true})
-	m = next.(model)
-	next, _ = m.Update(uiEvent{event: core.Event{Kind: core.EventActivity, Active: true}})
-	m = next.(model)
-	m.streaming = "newer turn"
-	m.responseText = "newer turn"
-
-	next, _ = m.Update(taskNotificationEvent{notification: channel.Notification{Text: "recovered answer", Recovery: true}})
-	m = next.(model)
-	if len(m.transcript) != 4 || m.transcript[3].text != "recovered answer" {
-		t.Fatalf("recovered transcript ordering = %#v", m.transcript)
-	}
-	if m.streaming != "newer turn" || m.responseText != "newer turn" || !m.working {
-		t.Fatalf("recovery disturbed newer turn: streaming=%q response=%q working=%t", m.streaming, m.responseText, m.working)
-	}
-	if m.notificationAckBusy || len(m.pendingNotifications) != 0 {
-		t.Fatalf("recovery entered notification acknowledgement: busy=%t pending=%#v", m.notificationAckBusy, m.pendingNotifications)
-	}
-	if m.recoveryActivity != 1 || m.recoveryTerminalAhead != 1 || m.mainAgentActivity != 1 {
-		t.Fatalf("recovered placeholder was not settled independently: recovery=%d ahead=%d activity=%d", m.recoveryActivity, m.recoveryTerminalAhead, m.mainAgentActivity)
-	}
-
-	next, _ = m.Update(uiEvent{event: core.Event{Kind: core.EventActivity}, conversation: true})
-	m = next.(model)
-	if m.recoveryActivity != 0 || m.recoveryTerminalAhead != 0 || m.mainAgentActivity != 1 || m.transcript[3].text != "recovered answer" {
-		t.Fatalf("activity cleanup removed recovered answer: recovery=%d ahead=%d activity=%d transcript=%#v", m.recoveryActivity, m.recoveryTerminalAhead, m.mainAgentActivity, m.transcript)
-	}
-}
-
-func TestRecoveredTerminalAndDelayedInactivePreserveOverlappingRecovery(t *testing.T) {
-	m := testModel()
-	for range 2 {
-		next, _ := m.Update(uiEvent{event: core.Event{Kind: core.EventActivity, Active: true}, conversation: true})
-		m = next.(model)
-	}
-
-	next, _ := m.Update(taskNotificationEvent{notification: channel.Notification{Text: "first recovered answer", Recovery: true}})
-	m = next.(model)
-	if m.recoveryActivity != 2 || m.recoveryTerminalAhead != 1 || m.mainAgentActivity != 1 || !m.working {
-		t.Fatalf("first terminal state = recovery %d, ahead %d, activity %d, working %t", m.recoveryActivity, m.recoveryTerminalAhead, m.mainAgentActivity, m.working)
-	}
-
-	next, _ = m.Update(uiEvent{event: core.Event{Kind: core.EventActivity}, conversation: true})
-	m = next.(model)
-	if m.recoveryActivity != 1 || m.recoveryTerminalAhead != 0 || m.mainAgentActivity != 1 || !m.working {
-		t.Fatalf("delayed inactive consumed overlapping recovery = recovery %d, ahead %d, activity %d, working %t", m.recoveryActivity, m.recoveryTerminalAhead, m.mainAgentActivity, m.working)
-	}
-
-	next, _ = m.Update(taskNotificationEvent{notification: channel.Notification{Text: "second recovered answer", Recovery: true}})
-	m = next.(model)
-	next, _ = m.Update(uiEvent{event: core.Event{Kind: core.EventActivity}, conversation: true})
-	m = next.(model)
-	if m.recoveryActivity != 0 || m.recoveryTerminalAhead != 0 || m.mainAgentActivity != 0 || m.working {
-		t.Fatalf("final overlap settlement = recovery %d, ahead %d, activity %d, working %t", m.recoveryActivity, m.recoveryTerminalAhead, m.mainAgentActivity, m.working)
-	}
-}
-
-func TestRecoveredTerminalPreservesIntentionalScrollAndShowsNewMessageStatus(t *testing.T) {
-	m, _ := streamingScrollTestModel()
-	m.viewport.GotoBottom()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
-	m = next.(model)
-	wantOffset := m.viewport.YOffset
-
-	next, _ = m.Update(taskNotificationEvent{notification: channel.Notification{Text: "recovered below", Recovery: true}})
-	m = next.(model)
-	if m.viewport.YOffset != wantOffset || m.status != "1 new message below" || m.newMessages != 1 {
-		t.Fatalf("recovered scroll state = offset %d want %d status %q new %d", m.viewport.YOffset, wantOffset, m.status, m.newMessages)
-	}
-	m.viewport.GotoBottom()
-	m.resumeTailFollowAtBottom()
-	if m.newMessages != 0 || m.status != "Harness working" {
-		t.Fatalf("tail return did not clear new-message status: status=%q new=%d", m.status, m.newMessages)
-	}
-}
-
 func TestConsecutiveStreamingEventsAreCopySafe(t *testing.T) {
 	m := testModel()
 
@@ -4969,7 +4873,7 @@ func runRealisticConcurrentLoad(tb testing.TB, iterations int) concurrentLoadMet
 			case 3:
 				message = tea.WindowSizeMsg{Width: 90 + index%3, Height: 30 + index%2}
 			case 4:
-				message = taskNotificationEvent{notification: channel.Notification{ID: fmt.Sprintf("task-%d", index), Text: "Task moved to review"}}
+				message = notificationEvent{notification: channel.Notification{ID: fmt.Sprintf("task-%d", index), Text: "Task moved to review"}}
 			case 5:
 				message = noticeEvent{notice: channel.Notice{Channel: "telegram", Sender: "operator", Text: "channel activity"}}
 			case 6:

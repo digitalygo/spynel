@@ -42,7 +42,7 @@ assert.throws(() => resolve("win32", "arm64"), /does not currently support Windo
 assert.throws(() => resolve("freebsd", "x64"), /does not publish/);
 
 assert.strictEqual(pkg.name, "@digitalygo/spynel");
-assert.strictEqual(pkg.description, "A non-AI orchestration layer connecting one human to many coding agents");
+assert.strictEqual(pkg.description, "A classic, non-AI program that coordinates and oversees external AI coding harnesses");
 assert.strictEqual(pkg.bin.spynel, "npm/bin/spynel.js");
 assert.strictEqual(pkg.publishConfig.access, "public");
 assert.strictEqual(pkg.publishConfig.registry, "https://registry.npmjs.org");

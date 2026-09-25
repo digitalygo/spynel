@@ -12,10 +12,12 @@ import (
 	"github.com/digitalygo/spynel/internal/history"
 )
 
-// watchTaskNotifications follows runtime-authored proactive assistant entries
-// plus stalled-message recovery terminals. Ordinary requested turns are
-// rendered by their response stream and remain intentionally ignored here.
-func watchTaskNotifications(ctx context.Context, path string, initialOffset ...int64) <-chan channel.Notification {
+// watchNotifications follows durable explicit notification entries written to
+// a TUI conversation history and surfaces them with their acknowledgement
+// identity. Ordinary requested turns are rendered by their response stream and
+// remain intentionally ignored here; retired recovery terminals carry no
+// durable notification identity and are never consumed.
+func watchNotifications(ctx context.Context, path string, initialOffset ...int64) <-chan channel.Notification {
 	output := make(chan channel.Notification, 16)
 	var offset int64
 	if len(initialOffset) > 0 {
@@ -58,10 +60,10 @@ func watchTaskNotifications(ctx context.Context, path string, initialOffset ...i
 				}
 				offset = nextOffset
 				var entry history.Entry
-				if json.Unmarshal(scanner.Bytes(), &entry) == nil && entry.Sender == "Spy" &&
-					(entry.Role == "notification_pending" || entry.Role == "assistant" || entry.Recovery) {
+				if json.Unmarshal(scanner.Bytes(), &entry) == nil && entry.Sender == "Spy" && entry.EventID != "" &&
+					(entry.Role == "notification_pending" || entry.Role == "assistant") {
 					select {
-					case output <- channel.Notification{ID: entry.EventID, Text: entry.Content, Recovery: entry.Recovery, Error: entry.Recovery && entry.Role == "error"}:
+					case output <- channel.Notification{ID: entry.EventID, Text: entry.Content}:
 					case <-ctx.Done():
 						file.Close()
 						return

@@ -13,12 +13,6 @@ harness:
   reasoning_effort: ""
   service_mode: ""
   sandbox: danger-full-access
-  chat_agent_prefix: ""
-  developer_agent_prefix: ""
-  reviewer_agent_prefix: ""
-  heartbeat_agent_prefix: ""
-  # skip-trivial lets each task creator decide; always and never override it.
-  reviews: skip-trivial
   # Used only when name is acp. Built-in ACP aliases supply these themselves.
   acp_command: ""
   acp_args: []
@@ -63,17 +57,6 @@ speech:
 
 startup:
   enabled: false
-
-orchestrator:
-  enabled: true
-  interval_seconds: 10
-  # Automatically processes stalled messages after restarts and disconnects.
-  retrigger_unresponded_messages: true
-  # Higher-level agent audit; 0 disables it. Changes take effect live.
-  semantic_heartbeat_minutes: 15
-  # off, decide (agent sends or records a skip once), or always (agent sends unless safely impossible).
-  task_notifications: decide
-  max_parallel: 4
 
 extensions:
   enabled: true

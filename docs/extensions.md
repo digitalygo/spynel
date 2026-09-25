@@ -16,17 +16,17 @@ hooks:
   message.received: ["./bin/hook", "message.received"]
   harness.before: ["./bin/hook", "harness.before"]
   harness.after: ["./bin/hook", "harness.after"]
-  task.claimed: ["./bin/hook", "task.claimed"]
-  task.completed: ["./bin/hook", "task.completed"]
 ```
+
+The supported lifecycle names are exactly `message.received`, `harness.before`, and `harness.after`. Discovery rejects any other hook name so a typo or removed hook cannot remain silently inactive.
 
 Spynel runs commands from the extension root with `SPYNEL_HOOK` and `SPYNEL_EXTENSION` environment variables. One JSON line arrives on stdin:
 
 ```json
-{"hook":"message.received","payload":{"channel":"telegram","text":"hello"}}
+{"hook":"message.received","payload":{"channel":"telegram","conversation":"TG-42","sender":"luca","text":"hello","reply_to":""}}
 ```
 
-`task.completed` payloads also carry a stable `event_id`. Delivery is at least once: Spynel durably records each extension only after the hook exits successfully, and retries an unrecorded hook after failure or restart with the same event ID. A hook can therefore run more than once even when an earlier process already produced effects. Consumers of `task.completed` must persistently deduplicate every externally visible effect by `event_id`; an in-memory check is not sufficient. Spynel does not claim exactly-once execution of arbitrary extension side effects.
+`harness.before` carries `session_key`, `prompt`, and `channel`; `harness.after` carries `session_key`, `text`, and `kind`.
 
 Empty stdout preserves the payload. A JSON result can replace it, cancel the operation, or provide a local message:
 
@@ -36,6 +36,6 @@ Empty stdout preserves the payload. A JSON result can replace it, cancel the ope
 
 Hooks run sequentially in sorted extension-name order and each receives the previous hook's payload. Nonzero exit, timeout, invalid JSON, or protocol stdout beyond 1 MiB fails the surrounding operation instead of silently ignoring enforcement. Stderr is diagnostic rather than protocol data: Spynel retains at most 64 KiB for a failed hook, sends it through the runtime log's redaction and entry-boundary controls, and never includes it in the user-facing hook error.
 
-The supported lifecycle names are exactly `message.received`, `harness.before`, `harness.after`, `task.claimed`, and `task.completed`. Discovery rejects any other hook name so a typo or removed hook cannot remain silently inactive.
+Hooks carry no automatically supplied `event_id`, Spynel keeps no per-extension success receipt, and the runner does not retry by itself. Invocation can still repeat when the surrounding operation is retried by its caller, including after a hook failure, timeout, or interrupted restart, so a successful hook can execute more than once even after it already produced externally visible effects. Consumers must make those effects idempotent with their own stable keys when needed. Spynel does not claim exactly-once execution of arbitrary extension side effects.
 
 The current hook model changes messages and lifecycle behavior. Adding a future compiled-in channel or harness still requires implementing the corresponding Go interface; a future extension RPC protocol can expose those registries without weakening hook portability.

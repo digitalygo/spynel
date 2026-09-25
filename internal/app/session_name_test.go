@@ -160,10 +160,16 @@ func TestAutomaticSessionNamingAppliesToNonControlSurfaces(t *testing.T) {
 	}
 }
 
+// nativePiControlHarness is the Pi control fixture with native conversation
+// input enabled, so an unrecognized slash command reaches the harness raw.
+type nativePiControlHarness struct{ *piControlHarness }
+
+func (h *nativePiControlHarness) NativeConversationInput(string) bool { return true }
+
 func TestAutomaticSessionNamingDerivesCommandArguments(t *testing.T) {
-	target := newPiControlHarness()
+	target := &nativePiControlHarness{piControlHarness: newPiControlHarness()}
 	service := newPiControlService(t, target)
-	runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: "/task Clean up the docs"})
+	runPiControlMessage(t, service, core.Message{Channel: "tui", Conversation: "local", Text: "/skill Clean up the docs"})
 	target.mu.Lock()
 	calls := append([]piNameCall(nil), target.nameCalls...)
 	target.mu.Unlock()

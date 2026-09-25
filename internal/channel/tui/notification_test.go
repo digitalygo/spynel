@@ -23,7 +23,7 @@ func TestNotificationSplitsStreamOnlyAtIdleBoundary(t *testing.T) {
 	m.streaming = "Hello "
 	m.responseText = "Hello "
 	m.deltaSequence = 3
-	updated, _ := m.Update(taskNotificationEvent{notification: channel.Notification{ID: "n1", Text: "Task complete"}})
+	updated, _ := m.Update(notificationEvent{notification: channel.Notification{ID: "n1", Text: "Task complete"}})
 	m = updated.(model)
 	updated, _ = m.Update(notificationPauseMsg{sequence: 3})
 	m = updated.(model)
@@ -51,7 +51,7 @@ func TestNotificationReconsidersLaterSafePause(t *testing.T) {
 	m.streaming = "hel"
 	m.responseText = "hel"
 	m.deltaSequence = 1
-	updated, _ := m.Update(taskNotificationEvent{notification: channel.Notification{ID: "n1", Text: "Task complete"}})
+	updated, _ := m.Update(notificationEvent{notification: channel.Notification{ID: "n1", Text: "Task complete"}})
 	m = updated.(model)
 	updated, _ = m.Update(notificationPauseMsg{sequence: 1})
 	m = updated.(model)
@@ -153,7 +153,7 @@ func TestNotificationNoPauseFallbackAndMultipleQueue(t *testing.T) {
 	m.responseText = "hel"
 	m.deltaSequence = 1
 	for _, text := range []string{"one", "two"} {
-		updated, _ := m.Update(taskNotificationEvent{notification: channel.Notification{ID: text, Text: text}})
+		updated, _ := m.Update(notificationEvent{notification: channel.Notification{ID: text, Text: text}})
 		m = updated.(model)
 	}
 	updated, _ := m.Update(notificationPauseMsg{sequence: 1})

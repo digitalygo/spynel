@@ -5,11 +5,27 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/digitalygo/spynel/internal/config"
 	"github.com/digitalygo/spynel/internal/harness"
 	"github.com/digitalygo/spynel/internal/theme"
 )
+
+// retiredWorkflowPaths lists retired task/goal workflow locations and the
+// retired chat prompt that new and upgraded workspaces must never recreate.
+var retiredWorkflowPaths = []string{
+	".spynel/tasks", ".spynel/goals",
+	".spynel/prompts/chat.md",
+	".spynel/prompts/create-task.md", ".spynel/prompts/create-goal.md", ".spynel/prompts/task.md", ".spynel/prompts/goal.md",
+	".spynel/prompts/goal-review.md", ".spynel/prompts/review.md", ".spynel/prompts/recovery.md", ".spynel/prompts/heartbeat.md", ".spynel/prompts/notification.md",
+	".spynel/instructions/agent-chat.md", ".spynel/instructions/agent-developer.md", ".spynel/instructions/agent-reviewer.md", ".spynel/instructions/agent-notification.md", ".spynel/instructions/agent-heartbeat.md",
+}
+
+// retiredDirectories lists retired directories that new and upgraded
+// workspaces must never create, inspect, or follow. Existing legacy copies,
+// including user-owned symlinks, stay untouched and inert.
+var retiredDirectories = []string{".spynel/instructions", ".spynel/runtime/leases"}
 
 func TestInitCreatesDocumentedWorkspace(t *testing.T) {
 	previousDetection := detectCodingHarness
@@ -23,12 +39,8 @@ func TestInitCreatesDocumentedWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
-		".spynel/config.yaml", ".spynel/AGENTS.md", ".spynel/tasks/AGENTS.md",
-		".spynel/prompts/create-task.md", ".spynel/prompts/create-goal.md", ".spynel/prompts/task.md", ".spynel/prompts/review.md", ".spynel/prompts/goal-review.md", ".spynel/prompts/heartbeat.md", ".spynel/prompts/notification.md",
-		".spynel/instructions/agent-chat.md", ".spynel/instructions/agent-developer.md", ".spynel/instructions/agent-reviewer.md", ".spynel/instructions/agent-notification.md", ".spynel/instructions/agent-heartbeat.md",
-		".spynel/tasks/todo", ".spynel/tasks/working", ".spynel/tasks/review", ".spynel/tasks/reviewing", ".spynel/tasks/cancelled", ".spynel/tasks/archive",
-		".spynel/goals/proposed", ".spynel/goals/planning", ".spynel/goals/active", ".spynel/goals/review", ".spynel/goals/reviewing", ".spynel/goals/abandoned",
-		".spynel/attachments", ".spynel/jobs", ".spynel/runtime/leases",
+		".spynel/config.yaml", ".spynel/AGENTS.md", ".spynel/extensions/README.md",
+		".spynel/attachments", ".spynel/history", ".spynel/jobs", ".spynel/runtime", ".spynel/extensions", ".spynel/themes",
 		".spynel/themes/spynel.yaml", ".spynel/themes/hack-the-box.yaml", ".spynel/themes/github-colorblind-dark.yaml",
 		".spynel/themes/gruvbox-dark.yaml", ".spynel/themes/nord.yaml", ".spynel/themes/okabe-ito-dark.yaml",
 		".spynel/themes/gruvbox-light.yaml", ".spynel/themes/rose-pine-dawn.yaml", ".spynel/themes/tol-muted-light.yaml",
@@ -39,17 +51,14 @@ func TestInitCreatesDocumentedWorkspace(t *testing.T) {
 			t.Fatalf("missing initialized path %s: %v", path, err)
 		}
 	}
-	instructionEntries, err := os.ReadDir(filepath.Join(root, ".spynel", "instructions"))
-	if err != nil || len(instructionEntries) != 5 {
-		t.Fatalf("initialized instruction files = %d, %v", len(instructionEntries), err)
-	}
-	for _, entry := range instructionEntries {
-		info, statErr := entry.Info()
-		if statErr != nil {
-			t.Fatalf("instruction file %s metadata: %v", entry.Name(), statErr)
+	for _, path := range retiredWorkflowPaths {
+		if _, err := os.Lstat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("fresh workspace created retired workflow path %s: %v", path, err)
 		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-			t.Fatalf("instruction file %s mode = %v", entry.Name(), info.Mode())
+	}
+	for _, path := range retiredDirectories {
+		if _, err := os.Lstat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("fresh workspace created retired directory %s: %v", path, err)
 		}
 	}
 	cfg, err := config.Load(config.PathForRoot(root))
@@ -106,7 +115,7 @@ func TestInitCreatesDocumentedWorkspace(t *testing.T) {
 	}
 }
 
-func TestInitAndUpgradeRejectSymlinkedInstructionBoundaries(t *testing.T) {
+func TestInitAndUpgradePreserveLegacyInstructionSymlinkWithoutFollowingIt(t *testing.T) {
 	previousDetection := detectCodingHarness
 	detectCodingHarness = func(func(string) (string, error)) (harness.Definition, string, bool) {
 		return harness.Definition{}, "", false
@@ -127,15 +136,54 @@ func TestInitAndUpgradeRejectSymlinkedInstructionBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 			outside := t.TempDir()
-			if err := os.Symlink(outside, filepath.Join(stateRoot, "instructions")); err != nil {
+			link := filepath.Join(stateRoot, "instructions")
+			if err := os.Symlink(outside, link); err != nil {
 				t.Skipf("symlinks unavailable: %v", err)
 			}
-			if err := operation.run(root); err == nil || !strings.Contains(err.Error(), "must not be a symbolic link") {
-				t.Fatalf("%s error = %v", operation.name, err)
+			if err := operation.run(root); err != nil {
+				t.Fatalf("%s must succeed while the retired instructions path is a user-owned symlink: %v", operation.name, err)
+			}
+			info, err := os.Lstat(link)
+			if err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("%s altered the legacy instructions symlink: %v", operation.name, err)
 			}
 			entries, err := os.ReadDir(outside)
 			if err != nil || len(entries) != 0 {
-				t.Fatalf("%s wrote through symlinked instructions directory: %#v, %v", operation.name, entries, err)
+				t.Fatalf("%s wrote through the legacy instructions symlink: %#v, %v", operation.name, entries, err)
+			}
+			if _, err := os.Stat(filepath.Join(stateRoot, "history")); err != nil {
+				t.Fatalf("%s did not create the current history directory: %v", operation.name, err)
+			}
+		})
+	}
+}
+
+func TestInitAndUpgradeRejectSymlinkedStateRoot(t *testing.T) {
+	previousDetection := detectCodingHarness
+	detectCodingHarness = func(func(string) (string, error)) (harness.Definition, string, bool) {
+		return harness.Definition{}, "", false
+	}
+	t.Cleanup(func() { detectCodingHarness = previousDetection })
+
+	for _, operation := range []struct {
+		name string
+		run  func(string) error
+	}{
+		{name: "init", run: func(root string) error { return Init(root, false) }},
+		{name: "upgrade", run: Upgrade},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			root := t.TempDir()
+			outside := t.TempDir()
+			if err := os.Symlink(outside, filepath.Join(root, ".spynel")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			if err := operation.run(root); err == nil || !strings.Contains(err.Error(), "must not be a symbolic link") {
+				t.Fatalf("%s error = %v, want rejection of the symlinked state root", operation.name, err)
+			}
+			entries, err := os.ReadDir(outside)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("%s wrote through the symlinked state root: %#v, %v", operation.name, entries, err)
 			}
 		})
 	}
@@ -177,139 +225,284 @@ func TestWorkspaceTemplatesExcludeRepositoryDeveloperPolicy(t *testing.T) {
 
 }
 
-func TestFrameworkPromptsEncodeRiskProportionateReview(t *testing.T) {
-	chat, err := Template("chat.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{"expected value", "minor, localized, easily reversible changes", "explicit request for speed or no review", "Goal derivation alone never decides"} {
-		if !strings.Contains(string(chat), required) {
-			t.Errorf("communication prompt is missing review policy %q", required)
-		}
-	}
-
-	goal, err := Template("goal.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{"Follow the injected configured task-review mode", "`always` forces `review_required: true`", "allow direct completion", "mandatory goal outcome review"} {
-		if !strings.Contains(string(goal), required) {
-			t.Errorf("goal prompt is missing review policy %q", required)
-		}
-	}
-
-	review, err := Template("review.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{"If the workspace uses Git", "trivial, localized, low-risk corrections", "rerun the relevant verification", "requires design judgment"} {
-		if !strings.Contains(string(review), required) {
-			t.Errorf("review prompt is missing correction boundary %q", required)
-		}
-	}
+// fileSnapshot captures the observable identity of one regular file.
+type fileSnapshot struct {
+	data    []byte
+	mode    os.FileMode
+	modTime time.Time
 }
 
-func TestInitializedChatPromptContainsEvidenceGroundedHonestyContract(t *testing.T) {
+// snapshotWorkspaceFiles maps every regular file below root/.spynel to its
+// bytes, permission mode, and modification time so tests can prove that
+// upgrades preserve user files byte-identically without rewriting them.
+func snapshotWorkspaceFiles(t *testing.T, root string) map[string]fileSnapshot {
+	t.Helper()
+	snapshot := map[string]fileSnapshot{}
+	stateRoot := filepath.Join(root, ".spynel")
+	err := filepath.WalkDir(stateRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(stateRoot, path)
+		if err != nil {
+			return err
+		}
+		snapshot[relative] = fileSnapshot{data: data, mode: info.Mode().Perm(), modTime: info.ModTime()}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func TestUpgradePreservesUserFilesByteIdenticalIncludingRetiredWorkflowData(t *testing.T) {
 	root := t.TempDir()
 	if err := Init(root, false); err != nil {
 		t.Fatal(err)
 	}
-	embedded, err := Template("chat.md")
-	if err != nil {
+	retiredFiles := map[string][]byte{
+		filepath.Join(".spynel", "prompts", "chat.md"):                 []byte("user-owned chat prompt override\n"),
+		filepath.Join(".spynel", "prompts", "task.md"):                 []byte("custom task prompt\n"),
+		filepath.Join(".spynel", "prompts", "create-goal.md"):          []byte("custom goal creation prompt\n"),
+		filepath.Join(".spynel", "instructions", "agent-chat.md"):      []byte("Keep this chat preference.\n"),
+		filepath.Join(".spynel", "instructions", "agent-heartbeat.md"): []byte("Keep this heartbeat preference.\n"),
+		filepath.Join(".spynel", "tasks", "todo", "example.md"):        []byte("---\nid: example\nstatus: todo\n---\n# Example\n"),
+		filepath.Join(".spynel", "goals", "active", "outcome.md"):      []byte("---\nid: outcome\nstatus: active\nround: 1\n---\n# Outcome\n"),
+		filepath.Join(".spynel", "tasks", "archive", "old.md"):         []byte("---\nid: old\nstatus: done\n---\n# Old\n"),
+	}
+	for path, data := range retiredFiles {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, path), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary := filepath.Join(root, ".spynel", "extensions", "README.md")
+	summaryCustom := []byte("user-owned extension notes\n")
+	if err := os.WriteFile(summary, summaryCustom, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	initialized, err := os.ReadFile(filepath.Join(root, ".spynel", "prompts", "chat.md"))
-	if err != nil {
+	type dirSnapshot struct {
+		mode    os.FileMode
+		modTime time.Time
+	}
+	legacyDirs := map[string]dirSnapshot{}
+	for _, relative := range []string{".spynel/instructions", ".spynel/prompts", ".spynel/tasks", ".spynel/goals"} {
+		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacyDirs[relative] = dirSnapshot{mode: info.Mode(), modTime: info.ModTime()}
+	}
+	before := snapshotWorkspaceFiles(t, root)
+
+	if err := Upgrade(root); err != nil {
 		t.Fatal(err)
 	}
-	for source, data := range map[string][]byte{
-		"embedded":    embedded,
-		"initialized": initialized,
-	} {
-		text := string(data)
-		for _, required := range []string{"Never knowingly lie", "fabricate evidence", "I don't know yet", "dispatch, delivery, completion, release", "not a guarantee"} {
-			if !strings.Contains(text, required) {
-				t.Errorf("%s chat prompt omitted %q", source, required)
+	after := snapshotWorkspaceFiles(t, root)
+	for relative, beforeFile := range before {
+		afterFile, ok := after[relative]
+		if !ok {
+			t.Fatalf("upgrade deleted user file %s", relative)
+		}
+		if string(beforeFile.data) != string(afterFile.data) {
+			t.Fatalf("upgrade rewrote user file %s", relative)
+		}
+		if beforeFile.mode != afterFile.mode {
+			t.Fatalf("upgrade changed mode of user file %s: %v != %v", relative, beforeFile.mode, afterFile.mode)
+		}
+		if !beforeFile.modTime.Equal(afterFile.modTime) {
+			t.Fatalf("upgrade rewrote user file %s: modification time changed", relative)
+		}
+	}
+	for relative, beforeDir := range legacyDirs {
+		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatalf("upgrade altered legacy directory %s: %v", relative, err)
+		}
+		if info.Mode() != beforeDir.mode || !info.ModTime().Equal(beforeDir.modTime) {
+			t.Fatalf("upgrade modified legacy directory %s", relative)
+		}
+	}
+	for path, data := range retiredFiles {
+		got, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil || string(got) != string(data) {
+			t.Fatalf("upgrade altered retired user file %s: %q, %v", path, got, err)
+		}
+	}
+	if got, err := os.ReadFile(summary); err != nil || string(got) != string(summaryCustom) {
+		t.Fatalf("upgrade overwrote the extension README: %q, %v", got, err)
+	}
+	// Upgrading must not resurrect retired workflow content beyond what the
+	// user already owns.
+	for _, path := range retiredWorkflowPaths {
+		full := filepath.Join(root, path)
+		if _, err := os.Lstat(full); err != nil {
+			if !os.IsNotExist(err) {
+				t.Fatalf("stat retired path %s: %v", path, err)
 			}
+			continue
+		}
+		_, created := retiredFiles[path]
+		_, createdDir := map[string]bool{
+			filepath.Join(".spynel", "tasks"): true,
+			filepath.Join(".spynel", "goals"): true,
+		}[path]
+		if !created && !createdDir {
+			t.Fatalf("upgrade created retired workflow path %s", path)
 		}
 	}
 }
 
-func TestUpgradeAddsReviewAssetsWithoutOverwritingPrompts(t *testing.T) {
+func TestUpgradeDoesNotRecreateRemovedRetiredWorkflowFiles(t *testing.T) {
+	previousDetection := detectCodingHarness
+	detectCodingHarness = func(func(string) (string, error)) (harness.Definition, string, bool) {
+		return harness.Definition{}, "", false
+	}
+	t.Cleanup(func() { detectCodingHarness = previousDetection })
 	root := t.TempDir()
 	if err := Init(root, false); err != nil {
 		t.Fatal(err)
 	}
-	taskPrompt := filepath.Join(root, ".spynel", "prompts", "task.md")
-	custom := []byte("custom task prompt\n")
-	if err := os.WriteFile(taskPrompt, custom, 0o600); err != nil {
+	// A workspace that once had retired files and lost them (user deletion or
+	// an older layout) must not regain them through upgrade or force init.
+	removed := filepath.Join(root, ".spynel", "prompts", "review.md")
+	if err := os.MkdirAll(filepath.Dir(removed), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	heartbeatPrompt := filepath.Join(root, ".spynel", "prompts", "heartbeat.md")
-	heartbeatCustom := []byte("custom heartbeat prompt\n")
-	if err := os.WriteFile(heartbeatPrompt, heartbeatCustom, 0o600); err != nil {
+	if err := os.WriteFile(removed, []byte("old review prompt\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	notificationPrompt := filepath.Join(root, ".spynel", "prompts", "notification.md")
-	notificationCustom := []byte("custom notification prompt\n")
-	if err := os.WriteFile(notificationPrompt, notificationCustom, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	instructionPath := filepath.Join(root, ".spynel", "instructions", "agent-developer.md")
-	instructionCustom := []byte("Keep this developer preference.\n")
-	if err := os.WriteFile(instructionPath, instructionCustom, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	missingInstruction := filepath.Join(root, ".spynel", "instructions", "agent-reviewer.md")
-	if err := os.Remove(missingInstruction); err != nil {
-		t.Fatal(err)
-	}
-	reviewPrompt := filepath.Join(root, ".spynel", "prompts", "review.md")
-	if err := os.Remove(reviewPrompt); err != nil {
-		t.Fatal(err)
-	}
-	createTaskPrompt := filepath.Join(root, ".spynel", "prompts", "create-task.md")
-	if err := os.Remove(createTaskPrompt); err != nil {
-		t.Fatal(err)
-	}
-	goalReviewPrompt := filepath.Join(root, ".spynel", "prompts", "goal-review.md")
-	if err := os.Remove(goalReviewPrompt); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(root, ".spynel", "tasks", "review")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(root, ".spynel", "goals", "reviewing")); err != nil {
+	if err := os.Remove(removed); err != nil {
 		t.Fatal(err)
 	}
 	if err := Upgrade(root); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(taskPrompt); string(got) != string(custom) {
-		t.Fatal("upgrade overwrote a user prompt")
+	if _, err := os.Lstat(removed); !os.IsNotExist(err) {
+		t.Fatalf("upgrade recreated removed retired file: %v", err)
 	}
-	if got, _ := os.ReadFile(heartbeatPrompt); string(got) != string(heartbeatCustom) {
-		t.Fatal("upgrade overwrote a user heartbeat prompt")
-	}
-	if got, _ := os.ReadFile(notificationPrompt); string(got) != string(notificationCustom) {
-		t.Fatal("upgrade overwrote a user notification prompt")
-	}
-	if got, _ := os.ReadFile(instructionPath); string(got) != string(instructionCustom) {
-		t.Fatal("upgrade overwrote user persistent instructions")
-	}
-	if _, err := os.Stat(missingInstruction); err != nil {
-		t.Fatalf("upgrade did not restore missing persistent instructions: %v", err)
-	}
-	if _, err := os.Stat(reviewPrompt); err != nil {
+	if err := Init(root, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".spynel", "tasks", "review")); err != nil {
-		t.Fatal(err)
+	if _, err := os.Lstat(removed); !os.IsNotExist(err) {
+		t.Fatalf("force init recreated removed retired file: %v", err)
 	}
-	for _, path := range []string{createTaskPrompt, goalReviewPrompt, filepath.Join(root, ".spynel", "goals", "reviewing")} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("upgrade did not restore %s: %v", path, err)
+	for _, path := range retiredWorkflowPaths {
+		if _, err := os.Lstat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("re-init created retired workflow path %s: %v", path, err)
 		}
+	}
+	for _, path := range retiredDirectories {
+		if _, err := os.Lstat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("workspace created retired directory %s: %v", path, err)
+		}
+	}
+}
+
+func TestUpgradeRestoresMissingCurrentAssetsOnly(t *testing.T) {
+	previousDetection := detectCodingHarness
+	detectCodingHarness = func(func(string) (string, error)) (harness.Definition, string, bool) {
+		return harness.Definition{}, "", false
+	}
+	t.Cleanup(func() { detectCodingHarness = previousDetection })
+	root := t.TempDir()
+	if err := Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(".spynel", "extensions", "README.md"),
+		filepath.Join(".spynel", "AGENTS.md"),
+	} {
+		if err := os.Remove(filepath.Join(root, path)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The generic runtime root must come back even when a partial layout
+	// lost it entirely; the retired lease directory inside it must not.
+	runtimeRoot := filepath.Join(root, ".spynel", "runtime")
+	if err := os.Remove(runtimeRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := Upgrade(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(".spynel", "extensions", "README.md"),
+		filepath.Join(".spynel", "AGENTS.md"),
+	} {
+		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
+			t.Fatalf("upgrade did not restore missing current asset %s: %v", path, err)
+		}
+	}
+	info, err := os.Stat(runtimeRoot)
+	if err != nil {
+		t.Fatalf("upgrade did not restore the current runtime root: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("restored runtime root is not a directory: %v", info.Mode())
+	}
+	for _, path := range retiredWorkflowPaths {
+		if _, err := os.Lstat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("upgrade created retired workflow path %s: %v", path, err)
+		}
+	}
+	for _, path := range retiredDirectories {
+		if _, err := os.Lstat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("upgrade created retired directory %s: %v", path, err)
+		}
+	}
+}
+
+func TestTemplateConfigOmitsRetiredWorkflowSettings(t *testing.T) {
+	data, err := Template("config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, retired := range []string{
+		"orchestrator:", "reviews:", "chat_agent_prefix", "developer_agent_prefix",
+		"reviewer_agent_prefix", "heartbeat_agent_prefix", "semantic_heartbeat",
+		"task_notifications", "max_parallel",
+	} {
+		if strings.Contains(text, retired) {
+			t.Errorf("workspace template config still contains retired setting %q:\n%s", retired, text)
+		}
+	}
+	for _, required := range []string{
+		"sandbox: danger-full-access", "provider: elevenlabs", "theme: spynel",
+		"directory: .spynel/extensions", "history_max_messages: 50", "attachment_max_mb: 100",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("workspace template config lost current default %q:\n%s", required, text)
+		}
+	}
+	path := filepath.Join(t.TempDir(), config.FileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("template config must validate: %v", err)
 	}
 }
 
@@ -373,86 +566,6 @@ func TestForceInitAddsRevisedThemesWithoutReplacingExistingFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(newPath); err != nil {
 		t.Fatalf("force init did not materialize missing revised theme: %v", err)
-	}
-}
-
-func TestCommunicationPromptDispatchesWorkAndStaysResponsive(t *testing.T) {
-	data, err := Template("chat.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	prompt := string(data)
-	for _, contract := range []string{
-		"responsive control plane",
-		"Questions, conversation, and status requests: answer promptly",
-		"create or update a durable task",
-		"create or update a durable goal",
-		"Do not implement requested work",
-		"Perform routine bounded inspection silently",
-		"send exactly one concise consolidated user-facing response",
-		"Do not send a preamble or progress message",
-		"trusted assistant, not as an orchestration console",
-		"Understood—this is being worked on.",
-		"Do not expose task or goal filenames",
-		"explicitly asks for technical details",
-		"/status`, `/jobs`, `/tasks`, `/goals`, `/job info`, `/log`",
-		"Telegram and WhatsApp, never include a local-path Markdown link",
-		"security implication, destructive effect, or failure",
-		"obtain the environment's current UTC time",
-		"If a new message arrives while you are responding",
-		"Do not silently abandon earlier commitments",
-	} {
-		if !strings.Contains(prompt, contract) {
-			t.Fatalf("communication prompt is missing %q:\n%s", contract, prompt)
-		}
-	}
-	if strings.Contains(prompt, "provide the durable path") {
-		t.Fatalf("communication prompt still requires a durable path in routine confirmations:\n%s", prompt)
-	}
-}
-
-func TestOrchestrationPromptsRequireClockDerivedTimestamps(t *testing.T) {
-	for _, name := range []string{"task.md", "review.md", "goal.md", "goal-review.md", "recovery.md"} {
-		data, err := Template(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		prompt := string(data)
-		if !strings.Contains(prompt, "current UTC time") || !strings.Contains(prompt, "estimate") {
-			t.Fatalf("%s does not require a clock-derived timestamp:\n%s", name, prompt)
-		}
-		if !strings.Contains(prompt, ".spynel/AGENTS.md") || !strings.Contains(prompt, "hidden") {
-			t.Fatalf("%s does not require the hidden workspace DOX chain:\n%s", name, prompt)
-		}
-		if strings.Count(prompt, "{{SPYNEL_DOCS_GUIDANCE}}") != 1 {
-			t.Fatalf("%s does not have exactly one docs guidance insertion point", name)
-		}
-		if (name == "task.md" || name == "review.md") && !strings.Contains(prompt, "completion_summary") {
-			t.Fatalf("%s does not require a durable notification summary", name)
-		}
-	}
-}
-
-func TestCreationPromptsDefineTaskAndGoalContracts(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		want []string
-	}{
-		{"create-task.md", []string{"{{USER_MESSAGE}}", "{{TASK_SOURCE}}", "one finite, independently verifiable objective", "[done, failed, waiting, cancelled]", "Do not implement", "Understood—this is being worked on.", "explicitly requested technical details"}},
-		{"create-goal.md", []string{"{{USER_MESSAGE}}", "{{GOAL_SOURCE}}", "long-lived, recurring, or multi-round outcome", "success_criteria", "round: 0", "Do not create implementation tasks", "summarizes the intended outcome", "planning or work has begun", "explicitly requested technical details"}},
-	} {
-		data, err := Template(test.name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, want := range test.want {
-			if !strings.Contains(string(data), want) {
-				t.Fatalf("%s is missing %q", test.name, want)
-			}
-		}
-		if strings.Contains(string(data), "durable path") {
-			t.Fatalf("%s still requires a durable path in its routine confirmation", test.name)
-		}
 	}
 }
 

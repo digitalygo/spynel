@@ -198,61 +198,6 @@ func TestOlderRecoveredGenerationCannotShadowNewerWrappedLiveJob(t *testing.T) {
 	}
 }
 
-func TestRecoveringDurableJobKeepsNumberAndArchiveAcrossRestart(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "jobs")
-	first := NewRuntime()
-	first.ConfigureJobArchive(directory)
-	details := JobDetails{Kind: "task", WorkID: "depfix-release", Phase: "task_implementation", PhaseAttempt: 1}
-	id := first.BeginJobWithDetails("old-session", "orchestrator", "markdown", "release task", details)
-	first.RecordJobEvent(id, core.Event{Kind: core.EventStatus, Text: "preserved release output", Done: true})
-	old, _ := first.Job(id)
-	first.archive.close() // simulate process exit without terminal archive finalization
-
-	restarted := NewRuntime()
-	restarted.ConfigureJobArchive(directory)
-	recoveredID := restarted.BeginJobWithDetails("new-session", "orchestrator", "markdown", "release task", details)
-	recovered, _ := restarted.Job(recoveredID)
-	if recovered.Number != old.Number || recovered.StableID != old.StableID {
-		t.Fatalf("recovered identity = number %d stable %q, want %d %q", recovered.Number, recovered.StableID, old.Number, old.StableID)
-	}
-	restarted.RecordJobEvent(recoveredID, core.Event{Kind: core.EventFinal, Text: "recovery complete", Done: true})
-	restarted.EndJob(recoveredID)
-	_, output, err := restarted.ArchivedJob(old.Number)
-	if err != nil || !strings.Contains(output, "preserved release output") || !strings.Contains(output, "recovery complete") {
-		t.Fatalf("recovered output = %q, %v", output, err)
-	}
-}
-
-func TestOverlappingSameDispatchAllocatesDistinctOwnedGenerations(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "jobs")
-	details := JobDetails{Kind: "task", WorkID: "release", Phase: "task_implementation", PhaseAttempt: 1}
-	first := NewRuntime()
-	first.ConfigureJobArchive(directory)
-	firstID := first.BeginJobWithDetails("first", "orchestrator", "markdown", "release task", details)
-	firstJob, _ := first.Job(firstID)
-	first.RecordJobEvent(firstID, core.Event{Kind: core.EventStatus, Text: "first runtime output", Done: true})
-
-	second := NewRuntime()
-	second.ConfigureJobArchive(directory)
-	secondID := second.BeginJobWithDetails("second", "orchestrator", "markdown", "release task", details)
-	secondJob, _ := second.Job(secondID)
-	if firstJob.Number == secondJob.Number || firstJob.Generation == secondJob.Generation || firstJob.StableID == secondJob.StableID {
-		t.Fatalf("overlapping dispatch reused active identity: first=%#v second=%#v", firstJob, secondJob)
-	}
-	second.RecordJobEvent(secondID, core.Event{Kind: core.EventStatus, Text: "second runtime output", Done: true})
-	first.EndJob(firstID)
-	second.EndJob(secondID)
-
-	_, firstOutput, firstErr := second.ArchivedJob(firstJob.Number)
-	_, secondOutput, secondErr := second.ArchivedJob(secondJob.Number)
-	if firstErr != nil || !strings.Contains(firstOutput, "first runtime output") || strings.Contains(firstOutput, "second runtime output") {
-		t.Fatalf("first archive corrupted: %q, %v", firstOutput, firstErr)
-	}
-	if secondErr != nil || !strings.Contains(secondOutput, "second runtime output") || strings.Contains(secondOutput, "first runtime output") {
-		t.Fatalf("second archive corrupted: %q, %v", secondOutput, secondErr)
-	}
-}
-
 func TestCleanupProtectsArchiveOwnedByAnotherRuntime(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "jobs")
 	first := NewRuntime()
@@ -279,101 +224,6 @@ func TestCleanupProtectsArchiveOwnedByAnotherRuntime(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(directory, job.StableID+".owner.lock")); !os.IsNotExist(err) {
 		t.Fatalf("retired owner lock remains: %v", err)
-	}
-}
-
-func TestRecoveringTerminalizedDurableJobKeepsNumberAndArchiveAcrossRestart(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "jobs")
-	first := NewRuntime()
-	first.ConfigureJobArchive(directory)
-	details := JobDetails{Kind: "task", WorkID: "depfix-release", Phase: "task_implementation", PhaseAttempt: 1}
-	id := first.BeginJobWithDetails("old-session", "orchestrator", "markdown", "release task", details)
-	first.RecordJobEvent(id, core.Event{Kind: core.EventFinal, Text: "provider completed before recovery", Done: true})
-	old, _ := first.Job(id)
-	first.EndJob(id)
-
-	restarted := NewRuntime()
-	restarted.ConfigureJobArchive(directory)
-	recoveredID := restarted.BeginJobWithDetails("new-session", "orchestrator", "markdown", "release task", details)
-	recovered, _ := restarted.Job(recoveredID)
-	if recovered.Number != old.Number || recovered.Generation != old.Generation || recovered.StableID != old.StableID {
-		t.Fatalf("recovered identity = number %d generation %d stable %q, want %d %d %q", recovered.Number, recovered.Generation, recovered.StableID, old.Number, old.Generation, old.StableID)
-	}
-	restarted.RecordJobEvent(recoveredID, core.Event{Kind: core.EventFinal, Text: "recovery completed", Done: true})
-	restarted.EndJob(recoveredID)
-	item, output, err := restarted.ArchivedJob(old.Number)
-	if err != nil || item.ID != old.StableID || !strings.Contains(output, "provider completed before recovery") || !strings.Contains(output, "recovery completed") {
-		t.Fatalf("recovered archive = %#v %q, %v", item, output, err)
-	}
-}
-
-func TestDurableRecoveryDoesNotReuseDifferentJobKind(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "jobs")
-	first := NewRuntime()
-	first.ConfigureJobArchive(directory)
-	taskDetails := JobDetails{Kind: "task", WorkID: "depfix-release", Phase: "task_implementation", PhaseAttempt: 1}
-	taskID := first.BeginJobWithDetails("task", "orchestrator", "markdown", "release task", taskDetails)
-	task, _ := first.Job(taskID)
-	first.EndJob(taskID)
-	notificationID := first.BeginJobWithDetails("notification", "orchestrator", "markdown", "task notification agent", JobDetails{Kind: "notification", WorkID: "depfix-release", Phase: "notification", PhaseAttempt: 1})
-	notification, _ := first.Job(notificationID)
-	first.EndJob(notificationID)
-	if notification.Number == task.Number {
-		t.Fatalf("notification reused task number %d", task.Number)
-	}
-
-	restarted := NewRuntime()
-	restarted.ConfigureJobArchive(directory)
-	recoveredID := restarted.BeginJobWithDetails("recovered-task", "orchestrator", "markdown", "release task", taskDetails)
-	recovered, _ := restarted.Job(recoveredID)
-	if recovered.Number != task.Number || recovered.Generation != task.Generation || recovered.StableID != task.StableID {
-		t.Fatalf("recovered task identity = %#v, want %#v", recovered, task)
-	}
-}
-
-func TestDurableRecoverySeparatesWorkflowPhaseAndLaterAttempt(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "jobs")
-	first := NewRuntime()
-	first.ConfigureJobArchive(directory)
-	implementationDetails := JobDetails{Kind: "task", WorkID: "release", Phase: "task_implementation", PhaseAttempt: 1}
-	implementationID := first.BeginJobWithDetails("implementation", "orchestrator", "markdown", "release task", implementationDetails)
-	first.RecordJobEvent(implementationID, core.Event{Kind: core.EventFinal, Text: "implementation output", Done: true})
-	implementation, _ := first.Job(implementationID)
-	first.EndJob(implementationID)
-
-	reviewDetails := JobDetails{Kind: "task", WorkID: "release", Phase: "task_review", PhaseAttempt: 1}
-	reviewID := first.BeginJobWithDetails("review", "orchestrator", "markdown", "release task", reviewDetails)
-	first.RecordJobEvent(reviewID, core.Event{Kind: core.EventFinal, Text: "review output", Done: true})
-	review, _ := first.Job(reviewID)
-	first.EndJob(reviewID)
-	if review.Number == implementation.Number || review.StableID == implementation.StableID {
-		t.Fatalf("review reused implementation identity: implementation=%#v review=%#v", implementation, review)
-	}
-
-	restarted := NewRuntime()
-	restarted.ConfigureJobArchive(directory)
-	reworkDetails := JobDetails{Kind: "task", WorkID: "release", Phase: "task_implementation", PhaseAttempt: 2}
-	reworkID := restarted.BeginJobWithDetails("rework", "orchestrator", "markdown", "release task", reworkDetails)
-	rework, _ := restarted.Job(reworkID)
-	if rework.Number == implementation.Number || rework.StableID == implementation.StableID || rework.Number == review.Number || rework.StableID == review.StableID {
-		t.Fatalf("later attempt reused prior phase identity: implementation=%#v review=%#v rework=%#v", implementation, review, rework)
-	}
-	restarted.EndJob(reworkID)
-
-	recovery := NewRuntime()
-	recovery.ConfigureJobArchive(directory)
-	recoveredID := recovery.BeginJobWithDetails("recovered-rework", "orchestrator", "markdown", "release task", reworkDetails)
-	recovered, _ := recovery.Job(recoveredID)
-	if recovered.Number != rework.Number || recovered.Generation != rework.Generation || recovered.StableID != rework.StableID {
-		t.Fatalf("same-dispatch recovery identity = %#v, want %#v", recovered, rework)
-	}
-	_, implementationOutput, err := recovery.ArchivedJob(implementation.Number)
-	if err != nil || !strings.Contains(implementationOutput, "implementation output") || strings.Contains(implementationOutput, "review output") {
-		t.Fatalf("implementation archive corrupted: %q, %v", implementationOutput, err)
-	}
-	_, reviewOutput, err := recovery.ArchivedJob(review.Number)
-	if err != nil || !strings.Contains(reviewOutput, "review output") || strings.Contains(reviewOutput, "implementation output") {
-		t.Fatalf("review archive corrupted: %q, %v", reviewOutput, err)
 	}
 }
 
@@ -538,31 +388,6 @@ func TestJobArchiveRejectsSymlinkedWorkspaceBoundaryAndArchiveFiles(t *testing.T
 	clean.ConfigureJobArchive(directory)
 	if _, _, err := clean.ArchivedJob(ref); err == nil {
 		t.Fatal("symlinked archive file was readable")
-	}
-}
-
-func TestJobArchiveClassifiesOrchestratorOriginsAndLinkage(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "jobs")
-	runtime := NewRuntime()
-	runtime.ConfigureJobArchive(directory)
-	for _, test := range []struct {
-		kind, phase, state, origin string
-	}{
-		{kind: "task", phase: "implementation", state: "processing", origin: "task-implementation"},
-		{kind: "task", phase: "task_review", state: "processing", origin: "task-review"},
-		{kind: "goal", phase: "planning", state: "processing", origin: "goal-planning"},
-		{kind: "goal", phase: "goal_review", state: "processing", origin: "goal-review"},
-		{kind: "heartbeat", phase: "semantic_heartbeat", state: "working", origin: "heartbeat"},
-		{kind: "notification", phase: "notification", state: "acting", origin: "notification"},
-	} {
-		id := runtime.BeginJobWithDetails(test.origin, "orchestrator", "markdown", test.origin, JobDetails{Kind: test.kind, Provider: "codex", WorkID: "task-1", ParentID: "goal-1", PhaseAttempt: 2})
-		runtime.UpdateJobFromLease(id, test.state, test.phase, "", time.Now().UTC(), 1)
-		job, _ := runtime.Job(id)
-		runtime.EndJob(id)
-		item, _, err := runtime.ArchivedJob(job.StableID)
-		if err != nil || item.Origin != test.origin || item.WorkID != "task-1" || item.ParentID != "goal-1" || item.Phase != test.phase || item.State != "completed" {
-			t.Errorf("%s archive = %#v, %v", test.origin, item, err)
-		}
 	}
 }
 

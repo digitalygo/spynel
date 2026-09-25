@@ -80,10 +80,8 @@ type Notice struct {
 type NoticeReporter func(Notice)
 
 type Notification struct {
-	ID       string `json:"id"`
-	Text     string `json:"text"`
-	Recovery bool   `json:"recovery,omitempty"`
-	Error    bool   `json:"error,omitempty"`
+	ID   string `json:"id"`
+	Text string `json:"text"`
 }
 
 type Channel interface {

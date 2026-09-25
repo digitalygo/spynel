@@ -2,7 +2,7 @@
 
 Spynel can be the communication control plane for a development sandbox. Its
 existing application service owns conversations, harness dispatch, jobs, history,
-and ordinary task/goal notification delivery. The interface is provider-neutral;
+and ordinary notification delivery. The interface is provider-neutral;
 it does not add a second agent engine or sandbox-specific policy.
 
 ## Start headless; attach a terminal later
@@ -27,7 +27,7 @@ this mirror so it cannot corrupt that process's alternate screen.
 
 From another terminal in the same workspace/environment, run bare `spynel`
 (or `spynel serve --tui --config "$WORK/.spynel/config.yaml"`). It attaches to
-the same primary; only that primary runs channels and orchestration. An additional
+the same primary; only that primary runs channels and background services. An additional
 TUI has an independent conversation. It does **not** mirror `cli/adapter` or take
 over its response stream. `/resume` branches saved history into an independent
 TUI conversation. A headless server's separate stderr stays on its own terminal.
@@ -65,12 +65,12 @@ Ordinary later notifications addressed to `cli/adapter` arrive on `events` even
 after `send` exits. In a synthetic workspace, test the ordinary outbox path with:
 
 ```sh
-"$BIN" notify --workdir "$WORK" --origin cli/adapter --message 'Synthetic task result'
+"$BIN" notify --workdir "$WORK" --origin cli/adapter --message 'Synthetic result'
 ```
 
-This queues an ordinary local notification; it does not claim a task completed
-or replace task/goal notification policy. Notification agents still decide
-whether to send according to the existing workflow contracts.
+This queues an ordinary local notification through the same durable outbox used by
+`spynel notify`; it does not claim that any other work completed. Delivery is
+explicit and at least once with no reminder, scan, or agent policy.
 
 ## HTTP contract
 
@@ -156,7 +156,7 @@ Persist the cursor only after applying prior events; repeat delivery is possible
 if processing and cursor persistence are interrupted. Deduplicate by event `id`;
 also deduplicate ordinary notifications by `notification_id`, which survives an
 outbox delivery retry even if another history record was appended. Receipt does
-not acknowledge a notification or mutate task state.
+not acknowledge a notification or mutate durable state.
 
 Retention is the existing history lifetime: explicit clear/removal and ordinary
 history cleanup (default 30 days, live configurable) end replay. Subscribers do

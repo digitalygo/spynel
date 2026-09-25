@@ -23,13 +23,6 @@ const (
 	FileName           = ".spynel/config.yaml"
 	StateDirectoryName = ".spynel"
 
-	TaskReviewsSkipTrivial  = "skip-trivial"
-	TaskReviewsAlways       = "always"
-	TaskReviewsNever        = "never"
-	TaskNotificationsOff    = "off"
-	TaskNotificationsDecide = "decide"
-	TaskNotificationsAlways = "always"
-
 	// SpeechProviderElevenLabs is the default cloud transcription backend,
 	// which falls back to the local backend when its API key is missing or
 	// blank; SpeechProviderParakeet is the local backend. The catalog names
@@ -50,16 +43,15 @@ const (
 var ErrNotInitialized = errors.New("Spynel is not initialized")
 
 type Config struct {
-	Version      int          `yaml:"version"`
-	Workspace    Workspace    `yaml:"workspace"`
-	Harness      Harness      `yaml:"harness"`
-	Channels     Channels     `yaml:"channels"`
-	Speech       Speech       `yaml:"speech"`
-	Startup      Startup      `yaml:"startup"`
-	Orchestrator Orchestrator `yaml:"orchestrator"`
-	Extensions   Extensions   `yaml:"extensions"`
-	Path         string       `yaml:"-"`
-	Root         string       `yaml:"-"`
+	Version    int        `yaml:"version"`
+	Workspace  Workspace  `yaml:"workspace"`
+	Harness    Harness    `yaml:"harness"`
+	Channels   Channels   `yaml:"channels"`
+	Speech     Speech     `yaml:"speech"`
+	Startup    Startup    `yaml:"startup"`
+	Extensions Extensions `yaml:"extensions"`
+	Path       string     `yaml:"-"`
+	Root       string     `yaml:"-"`
 }
 
 type Workspace struct {
@@ -78,11 +70,6 @@ type Harness struct {
 	ReasoningEffort        string   `yaml:"reasoning_effort"`
 	ServiceMode            string   `yaml:"service_mode"`
 	Sandbox                string   `yaml:"sandbox"`
-	ChatAgentPrefix        string   `yaml:"chat_agent_prefix"`
-	DeveloperAgentPrefix   string   `yaml:"developer_agent_prefix"`
-	ReviewerAgentPrefix    string   `yaml:"reviewer_agent_prefix"`
-	HeartbeatAgentPrefix   string   `yaml:"heartbeat_agent_prefix"`
-	Reviews                string   `yaml:"reviews"`
 	ACPCommand             string   `yaml:"acp_command,omitempty"`
 	ACPArgs                []string `yaml:"acp_args,omitempty"`
 	reasoningEffortOmitted bool
@@ -94,31 +81,6 @@ type Harness struct {
 // still validating an explicitly selected medium strictly.
 func (h Harness) UsesLegacyReasoningEffort() bool {
 	return h.reasoningEffortOmitted && h.ReasoningEffort == "medium"
-}
-
-// EffectiveTaskReviewRequired applies the workspace-wide task review mode to
-// the per-document choice. Goal outcome review remains a separate mandatory
-// lifecycle phase.
-func (h Harness) EffectiveTaskReviewRequired(documentRequiresReview bool) bool {
-	switch h.Reviews {
-	case TaskReviewsAlways:
-		return true
-	case TaskReviewsNever:
-		return false
-	default:
-		return documentRequiresReview
-	}
-}
-
-// PrependAgentPrefix separates a harness-native command from the prompt with
-// exactly one ASCII space.
-// An empty prefix deliberately preserves the existing prompt byte-for-byte.
-func PrependAgentPrefix(prefix, prompt string) string {
-	prefix = strings.TrimSpace(prefix)
-	if prefix == "" {
-		return prompt
-	}
-	return prefix + " " + prompt
 }
 
 type Channels struct {
@@ -232,15 +194,6 @@ type Startup struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-type Orchestrator struct {
-	Enabled                      bool   `yaml:"enabled"`
-	IntervalSec                  int    `yaml:"interval_seconds"`
-	RetriggerUnrespondedMessages bool   `yaml:"retrigger_unresponded_messages"`
-	SemanticHeartbeatMinutes     int    `yaml:"semantic_heartbeat_minutes"`
-	TaskNotifications            string `yaml:"task_notifications"`
-	MaxParallel                  int    `yaml:"max_parallel"`
-}
-
 type Extensions struct {
 	Enabled     bool   `yaml:"enabled"`
 	Directory   string `yaml:"directory"`
@@ -264,18 +217,14 @@ func Default() Config {
 			// constructed with medium. Keeping that decode default distinguishes an
 			// omitted legacy key from an explicit empty/inherit value in current YAML.
 			Name: "", Model: "", ReasoningEffort: "medium", Sandbox: "danger-full-access", reasoningEffortOmitted: true,
-			Reviews: TaskReviewsSkipTrivial,
 		},
 		Channels: Channels{
 			TUI:      TUI{Title: "Spynel", Theme: "spynel"},
 			Telegram: Telegram{Name: "spynel", TokenEnv: "SPYNEL_TELEGRAM_TOKEN", Mode: "polling", WebhookListen: "127.0.0.1:8787", PollTimeoutSec: 30, GroupMode: "mention", WelcomeMessage: "Welcome, {name}!"},
 			WhatsApp: WhatsApp{Mode: "self-chat", Database: ".spynel/whatsapp.db", PollIntervalSec: 3},
 		},
-		Speech:  Speech{Enabled: true, TranscriptEcho: true, Provider: SpeechProviderElevenLabs, ElevenLabsAPIKeyEnv: DefaultElevenLabsAPIKeyEnv, ElevenLabsModelID: ElevenLabsModelScribeV2, Language: "en", NumThreads: 2, MaxFileMB: 100, MaxDurationSec: 1800, ChunkSeconds: 600},
-		Startup: Startup{},
-		Orchestrator: Orchestrator{
-			Enabled: true, IntervalSec: 10, RetriggerUnrespondedMessages: true, SemanticHeartbeatMinutes: 15, TaskNotifications: TaskNotificationsDecide, MaxParallel: 4,
-		},
+		Speech:     Speech{Enabled: true, TranscriptEcho: true, Provider: SpeechProviderElevenLabs, ElevenLabsAPIKeyEnv: DefaultElevenLabsAPIKeyEnv, ElevenLabsModelID: ElevenLabsModelScribeV2, Language: "en", NumThreads: 2, MaxFileMB: 100, MaxDurationSec: 1800, ChunkSeconds: 600},
+		Startup:    Startup{},
 		Extensions: Extensions{Enabled: true, Directory: ".spynel/extensions", HookTimeout: "30s"},
 	}
 }
@@ -341,11 +290,6 @@ func decode(data []byte, abs string) (Config, error) {
 	cfg.Harness.ReasoningEffort = normalizeInheritedValue(cfg.Harness.ReasoningEffort)
 	cfg.Harness.ServiceMode = normalizeServiceMode(cfg.Harness.ServiceMode)
 	cfg.Harness.Sandbox = normalizeSandbox(cfg.Harness.Sandbox)
-	cfg.Harness.ChatAgentPrefix = strings.TrimSpace(cfg.Harness.ChatAgentPrefix)
-	cfg.Harness.DeveloperAgentPrefix = strings.TrimSpace(cfg.Harness.DeveloperAgentPrefix)
-	cfg.Harness.ReviewerAgentPrefix = strings.TrimSpace(cfg.Harness.ReviewerAgentPrefix)
-	cfg.Harness.HeartbeatAgentPrefix = strings.TrimSpace(cfg.Harness.HeartbeatAgentPrefix)
-	cfg.Harness.Reviews = normalizeTaskReviewMode(cfg.Harness.Reviews)
 	cfg.Speech.Provider = strings.ToLower(strings.TrimSpace(cfg.Speech.Provider))
 	cfg.Speech.ElevenLabsAPIKey = strings.TrimSpace(cfg.Speech.ElevenLabsAPIKey)
 	cfg.Speech.ElevenLabsAPIKeyEnv = strings.TrimSpace(cfg.Speech.ElevenLabsAPIKeyEnv)
@@ -461,36 +405,6 @@ func (c Config) Validate() error {
 	case "read-only", "workspace-write", "danger-full-access":
 	default:
 		problems = append(problems, "harness.sandbox must be read-only, workspace-write, or danger-full-access")
-	}
-	for _, field := range []struct{ name, value string }{
-		{name: "chat_agent_prefix", value: c.Harness.ChatAgentPrefix},
-		{name: "developer_agent_prefix", value: c.Harness.DeveloperAgentPrefix},
-		{name: "reviewer_agent_prefix", value: c.Harness.ReviewerAgentPrefix},
-		{name: "heartbeat_agent_prefix", value: c.Harness.HeartbeatAgentPrefix},
-	} {
-		invalidControl := strings.IndexFunc(field.value, unicode.IsControl) >= 0
-		if len(field.value) > 256 || invalidControl {
-			problems = append(problems, "harness."+field.name+" must be one line of at most 256 bytes")
-		}
-	}
-	switch c.Harness.Reviews {
-	case TaskReviewsSkipTrivial, TaskReviewsAlways, TaskReviewsNever:
-	default:
-		problems = append(problems, "harness.reviews must be skip-trivial, always, or never")
-	}
-	if c.Orchestrator.Enabled && c.Orchestrator.IntervalSec <= 0 {
-		problems = append(problems, "orchestrator.interval_seconds must be positive")
-	}
-	if c.Orchestrator.MaxParallel <= 0 {
-		problems = append(problems, "orchestrator.max_parallel must be positive")
-	}
-	if minutes := c.Orchestrator.SemanticHeartbeatMinutes; minutes != 0 && (minutes < 5 || minutes > 1440) {
-		problems = append(problems, "orchestrator.semantic_heartbeat_minutes must be 0 (disabled) or between 5 and 1440")
-	}
-	switch c.Orchestrator.TaskNotifications {
-	case TaskNotificationsOff, TaskNotificationsDecide, TaskNotificationsAlways:
-	default:
-		problems = append(problems, "orchestrator.task_notifications must be off, decide, or always")
 	}
 	if c.Channels.WhatsApp.Mode != "" && c.Channels.WhatsApp.Mode != "self-chat" && c.Channels.WhatsApp.Mode != "dedicated" {
 		problems = append(problems, "channels.whatsapp.mode must be self-chat or dedicated")

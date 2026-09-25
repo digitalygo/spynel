@@ -110,7 +110,6 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	mux.HandleFunc("GET /v1/conversation", s.authorize(s.conversation))
 	mux.HandleFunc("POST /v1/screen-action", s.authorize(s.screenAction))
 	mux.HandleFunc("POST /v1/settings", s.authorize(s.settings))
-	mux.HandleFunc("POST /v1/run-once", s.authorize(s.runOnce))
 	mux.HandleFunc("POST /v1/notify", s.authorize(s.notify))
 	mux.HandleFunc("POST /v1/notification-ack", s.authorize(s.notificationAck))
 	mux.HandleFunc("POST /v1/diagnostic", s.authorize(s.diagnostic))
@@ -433,18 +432,6 @@ func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if _, err := s.Service.ApplySettings(input.Values); err != nil {
-		writeError(response, err)
-		return
-	}
-	response.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) runOnce(response http.ResponseWriter, request *http.Request) {
-	if err := s.Service.Orchestrator.ScanOnce(request.Context()); err != nil {
-		writeError(response, err)
-		return
-	}
-	if err := s.Service.Orchestrator.WaitForIdle(request.Context()); err != nil {
 		writeError(response, err)
 		return
 	}

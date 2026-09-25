@@ -245,9 +245,6 @@ func runFrameworkCLICommand(command string, args []string, version string) error
 	if name == "" {
 		name = "command"
 	}
-	if command == "tasks" || command == "goals" {
-		args = workflowListAliasArgs(args)
-	}
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	configPath := flags.String("config", "", "path to .spynel/config.yaml")
 	conversation := flags.String("conversation", "local", "durable CLI conversation name")
@@ -279,36 +276,9 @@ func runFrameworkCLICommand(command string, args []string, version string) error
 	return runFrameworkMessageMode(*configPath, *conversation, text, version, messageRunOptions{JSON: *jsonOutput, Output: os.Stdout})
 }
 
-// workflowListAliasArgs keeps list-specific options in the slash-command
-// payload while still allowing the plain CLI's shared flags before them. Go's
-// flag parser stops at the inserted view token and leaves the rest untouched.
-func workflowListAliasArgs(args []string) []string {
-	for index := 0; index < len(args); index++ {
-		argument := args[index]
-		switch {
-		case argument == "--config" || argument == "--conversation":
-			if index+1 >= len(args) {
-				return args
-			}
-			index++
-		case argument == "--json" || strings.HasPrefix(argument, "--config=") || strings.HasPrefix(argument, "--conversation=") || strings.HasPrefix(argument, "--json="):
-			continue
-		case strings.HasPrefix(argument, "-"):
-			result := make([]string, 0, len(args)+1)
-			result = append(result, args[:index]...)
-			result = append(result, "open")
-			result = append(result, args[index:]...)
-			return result
-		default:
-			return args
-		}
-	}
-	return args
-}
-
 // runFrameworkMessageMode routes shared slash commands through the owner when
 // present, but deliberately does not start a coding harness for an offline
-// one-shot command. Configuration, histories, logs, tasks, and extensions are
+// one-shot command. Configuration, histories, logs, jobs, and extensions are
 // application behavior and must remain usable before a harness is installed.
 func runFrameworkMessageMode(configPath, conversation, text, version string, options messageRunOptions) error {
 	cfg, err := config.Load(configPath)

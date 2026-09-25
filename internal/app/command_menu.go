@@ -8,9 +8,7 @@ import "github.com/digitalygo/spynel/internal/core"
 // Entries Telegram itself refuses, TUI-only surfaces, values that dispatch a
 // harness prompt, and commands used only during bot setup are excluded.
 var telegramCommands = []core.SlashCommand{
-	{Value: "/status", Usage: "/status", Description: "Show work, runtime, channel, and orchestrator state"},
-	{Value: "/tasks", Usage: "/tasks", Description: "List open tasks or select a semantic view"},
-	{Value: "/goals", Usage: "/goals", Description: "List open goals or select a semantic view"},
+	{Value: "/status", Usage: "/status", Description: "Show runtime, channel, and harness state"},
 	{Value: "/jobs", Usage: "/jobs", Description: "List running agent jobs"},
 	{Value: "/job", Usage: "/job", Description: "Inspect or control an agent job by number"},
 	{Value: "/log", Usage: "/log", Description: "Inspect, search, or clear captured runtime logs"},
@@ -27,8 +25,7 @@ var telegramCommands = []core.SlashCommand{
 	{Value: "/stop", Usage: "/stop", Description: "Stop the active execution for this chat"},
 	{Value: "/restart", Usage: "/restart", Description: "Restart Spynel and restore saved state"},
 	{Value: "/update", Usage: "/update", Description: "Update and restart all instances of this installation"},
-	{Value: "/trigger", Usage: "/trigger", Description: "List or start a triggerable background process"},
-	{Value: "/cleanup", Usage: "/cleanup", Description: "Remove old conversations and job archives; archive old terminal tasks"},
+	{Value: "/cleanup", Usage: "/cleanup", Description: "Remove old conversations and job archives"},
 	{Value: "/extension", Usage: "/extension", Description: "List or manage installed project extensions"},
 	{Value: "/welcome", Usage: "/welcome", Description: "Show the Spynel welcome guide"},
 	{Value: "/whatsapp", Usage: "/whatsapp", Description: "Inspect or change WhatsApp configuration"},

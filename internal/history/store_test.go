@@ -3,6 +3,7 @@ package history
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +266,58 @@ func TestConversationDiscoveryAndBranchingStayDiskBacked(t *testing.T) {
 	source, _, _ := store.RecentEntries("telegram", "TG-alice-42", 1, 1000)
 	if len(source) != 1 || source[0].Content != "message-19" {
 		t.Fatalf("source changed with branch: %#v", source)
+	}
+}
+
+func TestLegacyRecoveryFieldsStayReadableAndBranchWithoutNewMarker(t *testing.T) {
+	store := New(t.TempDir())
+	legacyPath := store.Path("telegram", "TG-legacy")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Join([]string{
+		`{"at":"2026-08-09T00:00:00Z","role":"user","content":"legacy question","recovery":true}`,
+		`{"at":"2026-08-09T00:00:01Z","role":"assistant","content":"legacy answer"}`,
+		`{"at":"2026-08-09T00:00:02Z","role":"correlation","recovery_baseline":true}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := store.Entries("telegram", "TG-legacy")
+	if err != nil || len(entries) != 2 || entries[0].Content != "legacy question" || entries[1].Content != "legacy answer" {
+		t.Fatalf("legacy history entries = %#v, %v", entries, err)
+	}
+	source, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(source) != legacy {
+		t.Fatalf("reading legacy history rewrote the file: %q", source)
+	}
+	branch, branchPath, err := store.BranchTo("telegram", "TG-legacy", "tui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchData, err := os.ReadFile(branchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(branchData) != legacy {
+		t.Fatalf("branch changed copied entries: %q", branchData)
+	}
+	if strings.Count(string(branchData), "\n") != strings.Count(legacy, "\n") {
+		t.Fatalf("branch appended a new recovery marker: %q", branchData)
+	}
+	after, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != legacy {
+		t.Fatalf("branch rewrote the source history: %q", after)
+	}
+	branchEntries, _, err := store.Entries("tui", branch)
+	if err != nil || len(branchEntries) != 2 || branchEntries[0].Content != "legacy question" || branchEntries[1].Content != "legacy answer" {
+		t.Fatalf("branch entries = %#v, %v", branchEntries, err)
 	}
 }
 

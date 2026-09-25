@@ -23,8 +23,8 @@ func TestLogoAnimatesGlobalJobsWhileDisplayedConversationIsIdle(t *testing.T) {
 		t.Helper()
 		next, _ := m.Update(m.waitEvent()())
 		m = next.(model)
-		if m.runtimeStatus.LiveJobs != want || m.working || m.mainAgentActivity != 0 || m.durableWork != (core.DurableWorkCounts{}) {
-			t.Fatalf("global jobs %d: runtime=%#v working=%t activity=%d work=%#v", want, m.runtimeStatus, m.working, m.mainAgentActivity, m.durableWork)
+		if m.runtimeStatus.LiveJobs != want || m.working || m.mainAgentActivity != 0 {
+			t.Fatalf("global jobs %d: runtime=%#v working=%t activity=%d", want, m.runtimeStatus, m.working, m.mainAgentActivity)
 		}
 		if want == 0 {
 			if m.logoAnimation != logoStopped || m.spynelLogo() != "○○" {
@@ -69,9 +69,5 @@ func TestLogoAnimatesGlobalJobsWhileDisplayedConversationIsIdle(t *testing.T) {
 	m.Update(logoAnimationTickMsg{generation: generation - 1})
 	if len(delays) != count {
 		t.Fatal("stale tick restarted a settled logo")
-	}
-	next, _ := m.Update(durableWorkEvent{counts: core.DurableWorkCounts{Tasks: 1, Goals: 1}})
-	if got := next.(model); got.logoAnimation != logoStopped || len(delays) != count {
-		t.Fatal("queued task/passive goal started the logo")
 	}
 }

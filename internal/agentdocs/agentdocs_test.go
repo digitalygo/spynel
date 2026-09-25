@@ -2,7 +2,6 @@ package agentdocs
 
 import (
 	"encoding/json"
-	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -12,7 +11,7 @@ func TestCatalogReferencesAreStableAndResolvable(t *testing.T) {
 	if err := Validate(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"commands", "tasks", "goals", "reviews", "notifications", "jobs", "logs", "configuration", "channels", "harnesses", "instances-primary", "workspace-state", "security", "troubleshooting", "architecture"}
+	want := []string{"integration", "commands", "notifications", "jobs", "logs", "configuration", "channels", "harnesses", "instances-primary", "workspace-state", "security", "troubleshooting", "architecture"}
 	for _, id := range want {
 		if _, ok := topicByID(id); !ok {
 			t.Errorf("missing required topic %q", id)
@@ -20,29 +19,130 @@ func TestCatalogReferencesAreStableAndResolvable(t *testing.T) {
 	}
 }
 
-func TestTaskAndGoalTopicsDocumentLiveListingCommands(t *testing.T) {
-	for _, test := range []struct {
-		topic string
-		want  []string
-	}{
-		{topic: "tasks", want: []string{"/tasks", "direct `spynel tasks`", "default to `open`", "three", "review", "failed", "NDJSON", "Telegram", "--detail", "never starts a harness", "4 hours"}},
-		{topic: "goals", want: []string{"/goals", "direct `spynel goals`", "default to `open`", "seven", "abandoned", "NDJSON", "WhatsApp", "round", "without invoking a harness", "12 hours"}},
-	} {
-		document, err := Lookup(Request{Topic: test.topic})
+func TestNoRetiredWorkflowTopicsOrCommands(t *testing.T) {
+	for _, retired := range []string{"tasks", "goals", "reviews", "persistent-instructions", "workflows"} {
+		document, err := Lookup(Request{Topic: retired})
 		if err != nil {
 			t.Fatal(err)
 		}
-		output, err := Render(Request{Topic: test.topic})
-		if err != nil {
-			t.Fatal(err)
+		if document.Error == nil || document.Error.Code != "unknown_topic" {
+			t.Errorf("retired topic %q = %#v", retired, document)
 		}
-		if document.Kind != "topic" {
-			t.Fatalf("%s document = %#v", test.topic, document)
+	}
+	commands := strings.Join(DocumentedSlashCommands(), " ")
+	for _, retired := range []string{"/tasks", "/goals", "/task", "/goal", "/trigger"} {
+		if strings.Contains(commands, retired) {
+			t.Errorf("retired slash command %q is still documented", retired)
 		}
-		for _, want := range test.want {
-			if !strings.Contains(output, want) {
-				t.Errorf("%s documentation missing %q:\n%s", test.topic, want, output)
+	}
+	for _, topic := range topics {
+		var content strings.Builder
+		for _, section := range topic.Sections {
+			content.WriteString(section.Content)
+			content.WriteString("\n")
+		}
+		output := strings.ToLower(content.String())
+		for _, retired := range []string{
+			"/tasks", "/goals", "/task ", "/goal ", "/trigger",
+			"spynel tasks", "spynel goals", "spynel task ", "spynel goal ", "spynel trigger",
+			"semantic heartbeat", "notification agent", "unresponded",
+			"markdown task management", "agent prefix", "harness.reviews", "orchestrator",
+		} {
+			if strings.Contains(output, retired) {
+				t.Errorf("topic %q still documents retired behavior %q", topic.ID, retired)
 			}
+		}
+	}
+}
+
+func TestDocumentedSlashCommandsMatchRetainedCatalog(t *testing.T) {
+	want := []string{"/help", "/status", "/primary", "/welcome", "/config", "/harness", "/model", "/effort", "/speed", "/theme", "/telegram", "/whatsapp", "/title", "/new", "/stop", "/pi", "/restart", "/update", "/history", "/resume", "/log", "/jobs", "/job", "/clear", "/cleanup", "/extension", "/quit"}
+	got := DocumentedSlashCommands()
+	if len(got) != len(want) {
+		t.Fatalf("documented commands = %#v, want %#v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("documented command %d = %q, want %q", index, got[index], want[index])
+		}
+	}
+}
+
+func TestHelpTopicsAreExactlySharedHelpIDs(t *testing.T) {
+	want := map[string]string{"about": "workspace-state", "commands": "commands", "config": "configuration", "channels": "channels", "extensions": "architecture"}
+	help := HelpTopics()
+	if len(help) != len(want) {
+		t.Fatalf("help topics = %#v", help)
+	}
+	for _, topic := range help {
+		source, ok := want[topic.ID]
+		if !ok {
+			t.Errorf("unexpected help topic %q", topic.ID)
+			continue
+		}
+		if topic.Title == "" || topic.Summary == "" || topic.Kind == "" {
+			t.Errorf("help topic %q lacks metadata: %#v", topic.ID, topic)
+		}
+		if stored, ok := topicByID(source); !ok || stored.HelpID != topic.ID {
+			t.Errorf("help topic %q is not backed by topic %q", topic.ID, source)
+		}
+	}
+}
+
+func TestRetainedSectionIDsAreStable(t *testing.T) {
+	want := map[string][]string{
+		"integration":       {"contract", "events", "transport"},
+		"commands":          {"shell", "slash", "updates"},
+		"notifications":     {"recent-routing", "delivery"},
+		"jobs":              {"live", "states", "control", "archive"},
+		"logs":              {"query", "job-output", "safety"},
+		"configuration":     {"file", "changes", "secrets"},
+		"channels":          {"conversations", "tui-editing", "delivery", "remote-access"},
+		"harnesses":         {"selection", "sessions", "slash-resources", "permissions"},
+		"instances-primary": {"election", "cross-environment", "handoff", "conversation"},
+		"workspace-state":   {"product-model", "pillars", "layout", "startup-discovery", "ownership", "static-vs-live"},
+		"security":          {"secrets", "execution", "precedence"},
+		"troubleshooting":   {"offline", "runtime", "foreign-primary"},
+		"architecture":      {"boundaries", "flow", "extensions"},
+	}
+	for id, sections := range want {
+		topic, ok := topicByID(id)
+		if !ok {
+			t.Errorf("missing topic %q", id)
+			continue
+		}
+		if len(topic.Sections) != len(sections) {
+			t.Errorf("topic %q sections = %#v", id, topic.Sections)
+			continue
+		}
+		for index, section := range topic.Sections {
+			if section.ID != sections[index] {
+				t.Errorf("topic %q section %d = %q, want %q", id, index, section.ID, sections[index])
+			}
+		}
+	}
+}
+
+func TestCommandsTopicDocumentsRetainedSurfaces(t *testing.T) {
+	output, err := Render(Request{Topic: "commands"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"/jobs", "/cleanup [days]", "/pi session", "/primary", "Unrecognized slash input", "native skill", "prompt-template", "`notify`", "`spynel docs`"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("commands documentation missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestNotificationsTopicDocumentsExplicitNotify(t *testing.T) {
+	output, err := Render(Request{Topic: "notifications"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--recent-authorized", "--workdir", "--origin", "--config", "outbox", "at least once", "mutually exclusive"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("notifications documentation missing %q:\n%s", want, output)
 		}
 	}
 }
@@ -57,11 +157,18 @@ func TestChannelsTopicDocumentsTelegramTopicsAndRichText(t *testing.T) {
 		"TG-group-<chat-id>-topic-<thread-id>",
 		"General topic",
 		"independent durable history and harness state",
+		"last non-continuing final response or terminal error",
 		"4096 parsed-visible code points",
 		"32768 parsed-visible code point reply budget",
 		"truncation marker",
 		"sendMessage",
 		"rate-limit rejection",
+		"--extension",
+		"before_agent_start",
+		"spynel_telegram",
+		"APPEND_SYSTEM.md",
+		"guidance, not a guarantee",
+		"one final question that ends the turn",
 		"all_private_chats",
 		"native command menu",
 		"surface-invalid",
@@ -71,6 +178,9 @@ func TestChannelsTopicDocumentsTelegramTopicsAndRichText(t *testing.T) {
 			t.Errorf("channels documentation missing %q:\n%s", want, output)
 		}
 	}
+	if strings.Contains(output, "append-system-prompt") {
+		t.Errorf("channels documentation still claims the stale --append-system-prompt mechanism:\n%s", output)
+	}
 }
 
 func TestHarnessTopicDocumentsPiACPAndQueueBatching(t *testing.T) {
@@ -78,10 +188,13 @@ func TestHarnessTopicDocumentsPiACPAndQueueBatching(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"`pi`", "ACP aliases", "harness.acp_command", "stdio", "not an endpoint URL", "every agent prefix defaults empty", "such as `/goal`", "dispatched together", "not an operating-system sandbox"} {
+	for _, want := range []string{"`pi`", "ACP aliases", "harness.acp_command", "stdio", "not an endpoint URL", "dispatched together", "not an operating-system sandbox", "native skill", "prompt-template", "--extension", "before_agent_start", "spynel_telegram", "APPEND_SYSTEM.md", "guidance, not a guarantee"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("harness documentation missing %q:\n%s", want, output)
 		}
+	}
+	if strings.Contains(output, "append-system-prompt") {
+		t.Errorf("harness documentation still claims the stale --append-system-prompt mechanism:\n%s", output)
 	}
 }
 
@@ -90,7 +203,7 @@ func TestAboutTopicStatesProductBoundaryAndPillars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Simplicity at scale", "classic, non-AI program", "One human → one agent → infinite agents", "assistant-facing relationship", "Three pillars", "communication interface", "Markdown task management", "Agentic loops", "harness supplies intelligence", "Simplicity. Leverage. Quality."} {
+	for _, want := range []string{"Simplicity at scale", "classic, non-AI program", "One human → one agent → infinite agents", "assistant-facing relationship", "Three pillars", "communication interface", "Durable conversation history and runtime oversight", "Agentic loops", "harness improvements strengthen rather than displace", "Simplicity. Leverage. Quality."} {
 		if !strings.Contains(output, want) {
 			t.Errorf("about documentation missing %q:\n%s", want, output)
 		}
@@ -105,16 +218,16 @@ func TestIndexTopicAndSearchPagination(t *testing.T) {
 	if index.Kind != "index" || index.Page.Number != 1 || index.Page.Total != 1 || len(index.Topics) != len(topics) {
 		t.Fatalf("index = %#v", index)
 	}
-	topic, _ := Lookup(Request{Topic: "goals"})
-	if topic.Kind != "topic" || topic.ID != "goals" || len(topic.Sections) == 0 || topic.Sections[0].ID == "" {
+	topic, _ := Lookup(Request{Topic: "jobs"})
+	if topic.Kind != "topic" || topic.ID != "jobs" || len(topic.Sections) == 0 || topic.Sections[0].ID == "" {
 		t.Fatalf("topic = %#v", topic)
 	}
-	search, _ := Lookup(Request{Search: "review"})
-	if search.Kind != "search" || search.Query != "review" || search.Page.TotalEntries < 2 {
+	search, _ := Lookup(Request{Search: "history"})
+	if search.Kind != "search" || search.Query != "history" || search.Page.TotalEntries < 2 {
 		t.Fatalf("search = %#v", search)
 	}
-	badPage, _ := Lookup(Request{Topic: "goals", Page: 99})
-	if badPage.Error == nil || badPage.Error.Code != "page_out_of_range" || !strings.Contains(badPage.Error.Suggestion, "goals page 1") {
+	badPage, _ := Lookup(Request{Topic: "jobs", Page: 99})
+	if badPage.Error == nil || badPage.Error.Code != "page_out_of_range" || !strings.Contains(badPage.Error.Suggestion, "jobs page 1") {
 		t.Fatalf("bad page = %#v", badPage)
 	}
 }
@@ -144,7 +257,7 @@ func TestPaginationUsesConservativeTokenBudgetAndRecordBoundaries(t *testing.T) 
 }
 
 func TestJSONSchemaErrorsSuggestionsAndOutputBounds(t *testing.T) {
-	output, err := Render(Request{Topic: "golas", Format: "json"})
+	output, err := Render(Request{Topic: "channnels", Format: "json"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,10 +265,10 @@ func TestJSONSchemaErrorsSuggestionsAndOutputBounds(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &document); err != nil {
 		t.Fatal(err)
 	}
-	if document.SchemaVersion != SchemaVersion || document.Kind != "error" || document.Error == nil || document.Error.Code != "unknown_topic" || document.Error.Suggestion != "spynel docs goals" {
+	if document.SchemaVersion != SchemaVersion || document.Kind != "error" || document.Error == nil || document.Error.Code != "unknown_topic" || document.Error.Suggestion != "spynel docs channels" {
 		t.Fatalf("error document = %#v", document)
 	}
-	for _, request := range []Request{{}, {Topic: "tasks"}, {Search: "state"}, {Topic: strings.Repeat("x", 129)}} {
+	for _, request := range []Request{{}, {Topic: "jobs"}, {Search: "state"}, {Topic: strings.Repeat("x", 129)}} {
 		for _, format := range []string{"text", "json"} {
 			request.Format = format
 			output, err := Render(request)
@@ -167,19 +280,19 @@ func TestJSONSchemaErrorsSuggestionsAndOutputBounds(t *testing.T) {
 			}
 		}
 	}
-	section, _ := Lookup(Request{Topic: "tasks#lifecycle"})
-	if section.ID != "tasks#lifecycle" || len(section.Sections) != 1 || section.Sections[0].ID != "lifecycle" {
+	section, _ := Lookup(Request{Topic: "jobs#states"})
+	if section.ID != "jobs#states" || len(section.Sections) != 1 || section.Sections[0].ID != "states" {
 		t.Fatalf("section reference = %#v", section)
 	}
-	badSection, _ := Lookup(Request{Topic: "tasks#lifecycl"})
-	if badSection.Error == nil || badSection.Error.Code != "unknown_section" || badSection.Error.Suggestion != "spynel docs tasks#lifecycle" {
+	badSection, _ := Lookup(Request{Topic: "jobs#statez"})
+	if badSection.Error == nil || badSection.Error.Code != "unknown_section" || badSection.Error.Suggestion != "spynel docs jobs#states" {
 		t.Fatalf("section suggestion = %#v", badSection)
 	}
-	malformed, _ := Lookup(Request{Topic: "tasks#"})
+	malformed, _ := Lookup(Request{Topic: "jobs#"})
 	if malformed.Error == nil || malformed.Error.Code != "invalid_reference" {
 		t.Fatalf("malformed section reference = %#v", malformed)
 	}
-	jsonOutput, err := Render(Request{Topic: "goals", Format: "json"})
+	jsonOutput, err := Render(Request{Topic: "jobs", Format: "json"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +302,7 @@ func TestJSONSchemaErrorsSuggestionsAndOutputBounds(t *testing.T) {
 	}
 }
 
-func TestPlainOutputHasNoTerminalControlsAndPromptPathIsCallable(t *testing.T) {
+func TestPlainOutputHasNoTerminalControls(t *testing.T) {
 	output, err := Render(Request{Topic: "commands"})
 	if err != nil {
 		t.Fatal(err)
@@ -197,18 +310,8 @@ func TestPlainOutputHasNoTerminalControlsAndPromptPathIsCallable(t *testing.T) {
 	if strings.Contains(output, "\x1b") || strings.Contains(output, "\r") {
 		t.Fatalf("plain output contains terminal controls: %q", output)
 	}
-	control, err := Render(Request{Search: "review\x1b[31m"})
+	control, err := Render(Request{Search: "history\x1b[31m"})
 	if err != nil || strings.Contains(control, "\x1b") || !strings.Contains(control, "invalid_input") {
 		t.Fatalf("control query response = %q, %v", control, err)
-	}
-	guidance := PromptGuidance()
-	if !strings.Contains(guidance, " docs <topic>") || !strings.Contains(guidance, "AGENTS.md") || strings.Count(InjectPromptGuidance(PromptPlaceholder+"\n"+PromptPlaceholder), "docs <topic>") != 1 {
-		t.Fatalf("prompt guidance = %q", guidance)
-	}
-	if runtime.GOOS == "windows" && strings.Contains(guidance, `\\`) {
-		t.Fatalf("Windows guidance retained escaped path separators: %q", guidance)
-	}
-	if got := promptCommand(`C:\Program Files\Spynel\spynel.exe`); got != `"C:/Program Files/Spynel/spynel.exe"` {
-		t.Fatalf("portable Windows command = %q", got)
 	}
 }

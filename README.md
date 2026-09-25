@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/resources/banner.webp" alt="Spynel — Simplicity. Leverage. Quality." width="100%">
+  <img src=".github/resources/banner.webp" alt="Spynel - Simplicity. Leverage. Quality." width="100%">
 </p>
 
 <p align="center">
@@ -20,8 +20,8 @@
 <table>
   <tr>
     <td width="50%" valign="middle">
-      <h2>One Human, one Chat</h2>
-      <p>Talk with one assistant for all of your AI automation. No more switching between chats, projects, and spaces - that is work for agents.</p>
+      <h2>One human, one chat</h2>
+      <p>Talk with one assistant for all of your AI work. No more switching between chats, projects, and spaces - that is work for your harnesses.</p>
     </td>
     <td width="50%" align="center">
       <img src=".github/resources/readme-one-human-one-chat.webp" alt="One person using a phone connected to one assistant" width="200" style="width: 100%; max-width: 200px; height: auto;">
@@ -32,17 +32,17 @@
       <img src=".github/resources/readme-infinite-leverage.webp" alt="One assistant coordinating a network of agents" width="200" style="width: 100%; max-width: 200px; height: auto;">
     </td>
     <td width="50%" valign="middle">
-      <h2>Infinite Leverage</h2>
-      <p>Hand off projects, tasks, and agent coordination through the assistant you already talk to. It can orchestrate many independent agents on your behalf, so your leverage scales without your coordination overhead.</p>
+      <h2>Compounding leverage</h2>
+      <p>One relationship reaches every agent your coding harnesses can run, so leverage scales without a matching increase in your coordination time.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="middle">
-      <h2>Quality Loops</h2>
-      <p>Reliable task management and autonomous agentic loops make thorough testing and review part of the workflow—not an afterthought.</p>
+      <h2>Nothing gets lost</h2>
+      <p>Every conversation, execution, and diagnostic stays durably on disk and inspectable, so quality work stays reviewable long after the turn ends.</p>
     </td>
     <td width="50%" align="center">
-      <img src=".github/resources/readme-quality.webp" alt="An assistant coordinating task management, testing, and review" width="200" style="width: 100%; max-width: 200px; height: auto;">
+      <img src=".github/resources/readme-quality.webp" alt="An assistant with durable conversation and execution records" width="200" style="width: 100%; max-width: 200px; height: auto;">
     </td>
   </tr>
 </table>
@@ -56,17 +56,17 @@
 # ◉◉ Spynel in a nutshell
 
 - Spynel is a lightweight program with no AI inside.
-- Spynel uses your existing Codex, Claude Code and other coding harnesses to do the work for it.
-- Spynel provides communication interface for you and orchestration framework for agents. 
+- Spynel uses your existing Codex, Claude Code, Pi, and other coding harnesses to do the work.
+- Spynel gives you one communication interface and one durable record over all of it.
 
 
 The idea is **one human → one assistant → ALL of the work**
 
 Spynel has three pillars:
 
-1. **Communication interface** — work through a single terminal chat UI, Telegram or WhatsApp
-2. **Markdown task management** — keep tasks, goals, decisions, evidence, and status durable and easily inspectable by any AI harness
-3. **Agentic loops** — let agents plan, implement, review, recover, and ask for human judgment when it matters
+1. **Communication interface** - work through a single terminal chat UI, Telegram, or WhatsApp
+2. **Durable oversight** - complete conversation history, live job inspection, and bounded diagnostics you can audit at any time
+3. **Agentic loops in your harnesses** - your coding harnesses plan, implement, debug, and improve quality while Spynel stays a classic coordinator
 
 **Simplicity. Leverage. Quality.**
 
@@ -96,12 +96,13 @@ Use `/config` for setup.
 ## Documentation
 
 - **Start here:** [Getting started and development](docs/getting-started.md)
-- **Configure Spynel:** [Configuration](docs/configuration.md)
+- **Configure Spynel:** [Configuration](docs/configuration.md) and the [configuration application matrix](docs/configuration-live-matrix.md)
 - **Use the TUI, Telegram, WhatsApp, and voice:** [Communication integrations](docs/integrations.md)
 - **Choose a coding harness:** [Harness compatibility](docs/harness-compatibility.md)
-- **Coordinate durable work:** [Tasks and goals](docs/tasks-and-goals.md)
 - **Understand the system and its security boundaries:** [Architecture](docs/architecture.md) and [provider-canary threat model](docs/provider-canary-threat-model.md)
-- **Automate from the terminal:** [CLI and automation](docs/cli.md) and [agent-readable docs](docs/agent-docs.md)
+- **Automate from the terminal:** [CLI and automation](docs/cli.md) and [programmatic integration](docs/programmatic-integration.md)
+- **Send proactive messages:** [Proactive notifications](docs/cli.md#proactive-notifications)
+- **Agent-readable docs:** [Agent-readable documentation](docs/agent-docs.md)
 - **Install trusted hooks:** [Extensions](docs/extensions.md)
 - **Build and publish releases:** [Releasing and packaging](docs/releasing.md)
 - **Diagnose common setup problems:** [Troubleshooting](docs/troubleshooting.md)

@@ -137,7 +137,7 @@ run-specific credential and revoke it immediately afterward.
 Preflight the VM and environment for known secret patterns before injection.
 Inject the credential only into the provider process through the narrowest
 provider-supported mechanism; do not put it in command arguments, repository
-files, shell profiles, images, cache layers, task documents, or workflow YAML.
+files, shell profiles, images, cache layers, workspace documents, or YAML state.
 Prevent tool subprocesses from inheriting it using a credential broker or an
 environment-scrubbing launcher. Never enable shell tracing or core dumps.
 

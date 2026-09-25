@@ -161,6 +161,8 @@ func (h *apiHarness) Close() error { return nil }
 
 func TestClientStreamsIndependentTUIConversationsThroughOwner(t *testing.T) {
 	state := t.TempDir()
+	// Legacy task/goal files from older workspaces stay on disk and must
+	// remain inert for streaming and shared state.
 	for relative, body := range map[string]string{
 		".spynel/tasks/waiting/open.md":  "not valid front matter",
 		".spynel/goals/proposed/open.md": "---\nid: goal\nstatus: proposed\n---\n# Goal\n",
@@ -187,6 +189,11 @@ func TestClientStreamsIndependentTUIConversationsThroughOwner(t *testing.T) {
 	}
 	if registeredState.Title != "Spynel" || len(registeredState.Connections) != 2 {
 		t.Fatalf("registration state = %#v", registeredState)
+	}
+	// Before any user message, the legacy task/goal files above must not
+	// create jobs through retired workflow dispatch.
+	if registeredState.Runtime.Jobs != 0 || registeredState.Runtime.LiveJobs != 0 {
+		t.Fatalf("legacy task/goal files created jobs: %#v", registeredState.Runtime)
 	}
 	if err := client.UnregisterLiveTUI(context.Background()); err != nil {
 		t.Fatalf("unregister live TUI: %v", err)
@@ -227,9 +234,20 @@ func TestClientStreamsIndependentTUIConversationsThroughOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stateSnapshot.Title != "Spynel" || len(stateSnapshot.Connections) != 2 || stateSnapshot.DurableWork != (core.DurableWorkCounts{Tasks: 1, Goals: 1}) || len(stateSnapshot.WorkDiagnostics) != 1 {
+	if stateSnapshot.Title != "Spynel" || len(stateSnapshot.Connections) != 2 {
 		t.Fatalf("shared state = %#v", stateSnapshot)
 	}
+	// The two admitted ordinary messages legitimately create two jobs, and
+	// terminal delivery precedes EndJob, so finishing records may still be
+	// visible here. No execution may remain live, and nothing beyond the two
+	// admitted turns may exist because retired workflow dispatch would add jobs.
+	if stateSnapshot.Runtime.LiveJobs != 0 {
+		t.Fatalf("live jobs after terminal responses = %#v", stateSnapshot.Runtime)
+	}
+	if stateSnapshot.Runtime.Jobs > 2 {
+		t.Fatalf("job count %d exceeds the two admitted turns: %#v", stateSnapshot.Runtime.Jobs, stateSnapshot.Runtime)
+	}
+	assertRetiredWorkflowFieldsAbsent(t, client, "/v1/state")
 	_ = server
 }
 
@@ -400,7 +418,7 @@ func TestClientLeavesLongRunningResponseHeadersToCallerContext(t *testing.T) {
 		t.Fatalf("client transport = %T", client.HTTP.Transport)
 	}
 	if transport.ResponseHeaderTimeout != 0 {
-		t.Fatalf("response header timeout = %s; long message and run-once requests must use their caller context", transport.ResponseHeaderTimeout)
+		t.Fatalf("response header timeout = %s; long message requests must use their caller context", transport.ResponseHeaderTimeout)
 	}
 }
 
@@ -449,7 +467,6 @@ func startTestServer(t *testing.T, state string) (*instance.Election, *Server, *
 	cfg.Root = state
 	cfg.Path = config.PathForRoot(state)
 	cfg.Extensions.Enabled = false
-	cfg.Orchestrator.Enabled = false
 	if err := os.MkdirAll(cfg.StatePath("prompts"), 0o700); err != nil {
 		t.Fatal(err)
 	}

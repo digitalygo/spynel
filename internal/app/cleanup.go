@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -27,14 +25,12 @@ type cleanupResult struct {
 	RemovedConversations int
 	RemovedJobArchives   int
 	RemovedJobBytes      int64
-	ArchivedTasks        int
-	RemovedObsoleteState int
 	Protected            int
 	Failed               int
 }
 
 func (r cleanupResult) String() string {
-	return fmt.Sprintf("Cleanup complete: %d conversations removed, %d job archives removed (%d bytes), %d terminal tasks archived, %d obsolete runtime items removed, %d live/protected items skipped, %d failures.", r.RemovedConversations, r.RemovedJobArchives, r.RemovedJobBytes, r.ArchivedTasks, r.RemovedObsoleteState, r.Protected, r.Failed)
+	return fmt.Sprintf("Cleanup complete: %d conversations removed, %d job archives removed (%d bytes), %d live/protected items skipped, %d failures.", r.RemovedConversations, r.RemovedJobArchives, r.RemovedJobBytes, r.Protected, r.Failed)
 }
 
 func (s *Service) cleanupCommand(message core.Message, remainder string, emit core.Emit) error {
@@ -103,7 +99,7 @@ func (s *Service) runCleanup(days int, liveChannel, liveConversation string, now
 		protected[latest.Channel+"\x00"+latest.Conversation] = true
 	}
 	for _, job := range s.Runtime.Jobs() {
-		if job.Channel != "" && job.Conversation != "" && job.Channel != "orchestrator" {
+		if job.Channel != "" && job.Conversation != "" {
 			protected[job.Channel+"\x00"+job.Conversation] = true
 		}
 	}
@@ -125,32 +121,7 @@ func (s *Service) runCleanup(days int, liveChannel, liveConversation string, now
 	result.RemovedJobBytes = removedJobBytes
 	result.Protected += jobProtected
 	result.Failed += jobFailed
-	archived, taskProtected, failed := s.Orchestrator.ArchiveTerminalTasks(cutoff)
-	result.ArchivedTasks = archived
-	result.Protected += taskProtected
-	result.Failed += failed
-	removedObsolete, obsoleteFailed := removeObsoleteNotificationState(s.Config.StatePath())
-	result.RemovedObsoleteState = removedObsolete
-	result.Failed += obsoleteFailed
 	return result, nil
-}
-
-func removeObsoleteNotificationState(stateDirectory string) (removed, failed int) {
-	for _, name := range []string{"notification-agents", "notification-agent-locks"} {
-		path := filepath.Join(stateDirectory, "runtime", name)
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			failed++
-			continue
-		}
-		if err := os.RemoveAll(path); err != nil {
-			failed++
-			continue
-		}
-		removed++
-	}
-	return removed, failed
 }
 
 // RegisterLiveTUI records a renewable owner-side lease for one conversation

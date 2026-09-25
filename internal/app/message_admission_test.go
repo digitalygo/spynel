@@ -8,11 +8,27 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/digitalygo/spynel/internal/config"
 	"github.com/digitalygo/spynel/internal/core"
+	"github.com/digitalygo/spynel/internal/workspace"
 )
 
+func newAdmissionTestService(t *testing.T) (*Service, *serviceHarness) {
+	t.Helper()
+	root := t.TempDir()
+	if err := workspace.Init(root, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(config.PathForRoot(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := newServiceHarness()
+	return New(cfg, target), target
+}
+
 func TestConcurrentMessageIdentityDispatchesOnce(t *testing.T) {
-	s, target, _ := newRecoveryTestService(t)
+	s, target := newAdmissionTestService(t)
 	message := core.Message{Channel: "cli", Conversation: "retry", Text: "hello", SourceMessageID: "retry-1"}
 	var wg sync.WaitGroup
 	errorsSeen := make(chan error, 20)

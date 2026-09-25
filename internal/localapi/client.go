@@ -39,10 +39,10 @@ func NewClient(election *instance.Election) *Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	// Message streams and run-once orchestration deliberately wait on a
-	// provider. Their caller contexts own cancellation; a fixed response-header
-	// timeout would turn ordinary long harness work into a false transport
-	// failure before the server can return its first event or final status.
+	// Message streams deliberately wait on a provider. Their caller contexts
+	// own cancellation; a fixed response-header timeout would turn ordinary
+	// long harness work into a false transport failure before the server can
+	// return its first event or final status.
 	transport.ResponseHeaderTimeout = 0
 	return &Client{
 		Election:     election,
@@ -331,15 +331,6 @@ func (c *Client) Diagnostic(ctx context.Context, event, message string) error {
 		return err
 	}
 	response, err := c.request(ctx, http.MethodPost, "/v1/diagnostic", body)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	return responseError(response)
-}
-
-func (c *Client) RunOnce(ctx context.Context) error {
-	response, err := c.request(ctx, http.MethodPost, "/v1/run-once", nil)
 	if err != nil {
 		return err
 	}

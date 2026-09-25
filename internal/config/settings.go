@@ -31,26 +31,15 @@ func Settings(cfg Config) []Setting {
 		{Key: "harness.reasoning_effort", Section: "harness", Description: "Reasoning effort; inherit uses the selected model default", Value: emptyAsInherit(cfg.Harness.ReasoningEffort)},
 		{Key: "harness.service_mode", Section: "harness", Description: "Optional model service/speed mode; inherit uses the provider default", Value: emptyAsInherit(cfg.Harness.ServiceMode)},
 		{Key: "harness.sandbox", Section: "harness", Description: "Coding-agent filesystem access; danger-full-access removes workspace confinement", Value: cfg.Harness.Sandbox, Choices: []string{"danger-full-access", "workspace-write", "read-only"}},
-		{Key: "harness.reviews", Section: "harness", Description: "Task review policy; skip-trivial lets agents decide, always forces review, and never disables task review", Value: cfg.Harness.Reviews, Choices: []string{TaskReviewsSkipTrivial, TaskReviewsAlways, TaskReviewsNever}},
 		{Key: "workspace.history_max_messages", Section: "config", Description: "Maximum recent messages passed to the harness (0 disables prior-history seeding; the current message is always delivered)", Value: strconv.Itoa(cfg.Workspace.HistoryMaxMessages)},
 		{Key: "workspace.history_char_limit", Section: "config", Description: "Maximum total history characters passed to the harness; bounds the current message when positive", Value: strconv.Itoa(cfg.Workspace.HistoryCharLimit)},
 		{Key: "startup.enabled", Section: "config", Description: "Autostart preference; setting it registers or removes this workspace's service and verifies the result, even when unchanged", Value: formatBool(cfg.Startup.Enabled), Choices: []string{"on", "off"}},
-		{Key: "harness.chat_agent_prefix", Section: "harness", Description: "Optionally prefix communication-agent messages with harness-native commands like `/goal`", Value: cfg.Harness.ChatAgentPrefix, Advanced: true},
-		{Key: "harness.developer_agent_prefix", Section: "harness", Description: "Optionally prefix implementation and planning agent messages with harness-native commands like `/goal`", Value: cfg.Harness.DeveloperAgentPrefix, Advanced: true},
-		{Key: "harness.reviewer_agent_prefix", Section: "harness", Description: "Optionally prefix task and goal reviewer messages with harness-native commands like `/goal`", Value: cfg.Harness.ReviewerAgentPrefix, Advanced: true},
-		{Key: "harness.heartbeat_agent_prefix", Section: "harness", Description: "Optionally prefix semantic-heartbeat audit agent messages with harness-native commands like `/goal`", Value: cfg.Harness.HeartbeatAgentPrefix, Advanced: true},
 		{Key: "harness.acp_command", Section: "harness", Description: "Executable name or absolute path for the custom ACP stdio agent", Value: cfg.Harness.ACPCommand, Advanced: true},
 		{Key: "harness.acp_args", Section: "harness", Description: "Command-line arguments for custom ACP (quotes and escapes group values; no shell expansion)", Value: cfg.ACPArgsText(), Advanced: true},
 		{Key: "workspace.attachment_max_mb", Section: "config", Description: "Maximum downloaded attachment size", Value: strconv.Itoa(cfg.Workspace.AttachmentMaxMB), Advanced: true},
 		{Key: "workspace.cleanup_retention_days", Section: "config", Description: "Age in whole days before automatic conversation/job cleanup and terminal-task archiving", Value: strconv.Itoa(cfg.Workspace.CleanupRetentionDays), Advanced: true},
 		{Key: "channels.tui.title", Section: "config", Description: "Default TUI title", Value: cfg.Channels.TUI.Title, Advanced: true},
 		{Key: "channels.tui.theme", Section: "config", Description: "Active color theme from .spynel/themes", Value: cfg.Channels.TUI.Theme, Advanced: true},
-		{Key: "orchestrator.enabled", Section: "config", Description: "Run Markdown tasks and goals", Value: formatBool(cfg.Orchestrator.Enabled), Choices: []string{"on", "off"}, Advanced: true},
-		{Key: "orchestrator.interval_seconds", Section: "config", Description: "Live route scan interval; saving resets the next scan deadline", Value: strconv.Itoa(cfg.Orchestrator.IntervalSec), Advanced: true},
-		{Key: "orchestrator.retrigger_unresponded_messages", Section: "config", Description: "Automatically processes stalled messages after restarts and disconnects.", Value: formatBool(cfg.Orchestrator.RetriggerUnrespondedMessages), Choices: []string{"on", "off"}, Advanced: true},
-		{Key: "orchestrator.semantic_heartbeat_minutes", Section: "config", Description: "Fixed delay after each agent workflow audit completes; 0 disables it", Value: strconv.Itoa(cfg.Orchestrator.SemanticHeartbeatMinutes), Advanced: true},
-		{Key: "orchestrator.task_notifications", Section: "config", Description: "Live policy context for direct task notification agents", Value: cfg.Orchestrator.TaskNotifications, Choices: []string{TaskNotificationsOff, TaskNotificationsDecide, TaskNotificationsAlways}, Advanced: true},
-		{Key: "orchestrator.max_parallel", Section: "config", Description: "Live maximum concurrent Markdown jobs; lowering never cancels active work", Value: strconv.Itoa(cfg.Orchestrator.MaxParallel), Advanced: true},
 		{Key: "extensions.enabled", Section: "config", Description: "Run trusted extension hooks after restart", Value: formatBool(cfg.Extensions.Enabled), Choices: []string{"on", "off"}, Restart: true, Advanced: true},
 		{Key: "extensions.directory", Section: "config", Description: "Installed extension directory after restart", Value: cfg.Extensions.Directory, Restart: true, Advanced: true},
 		{Key: "extensions.hook_timeout", Section: "config", Description: "Per-hook timeout after restart", Value: cfg.Extensions.HookTimeout, Restart: true, Advanced: true},
@@ -212,16 +201,6 @@ func setSetting(cfg *Config, key, value string) (Setting, error) { //nolint:gocy
 		cfg.Harness.ServiceMode = normalizeServiceMode(value)
 	case "harness.sandbox":
 		cfg.Harness.Sandbox = normalizeSandbox(value)
-	case "harness.chat_agent_prefix":
-		cfg.Harness.ChatAgentPrefix = value
-	case "harness.developer_agent_prefix":
-		cfg.Harness.DeveloperAgentPrefix = value
-	case "harness.reviewer_agent_prefix":
-		cfg.Harness.ReviewerAgentPrefix = value
-	case "harness.heartbeat_agent_prefix":
-		cfg.Harness.HeartbeatAgentPrefix = value
-	case "harness.reviews":
-		cfg.Harness.Reviews = normalizeTaskReviewMode(value)
 	case "harness.acp_command":
 		cfg.Harness.ACPCommand = value
 	case "harness.acp_args":
@@ -230,18 +209,6 @@ func setSetting(cfg *Config, key, value string) (Setting, error) { //nolint:gocy
 		cfg.Channels.TUI.Title = value
 	case "channels.tui.theme":
 		cfg.Channels.TUI.Theme = value
-	case "orchestrator.enabled":
-		cfg.Orchestrator.Enabled, err = parseBoolean()
-	case "orchestrator.interval_seconds":
-		cfg.Orchestrator.IntervalSec, err = parseInteger(1)
-	case "orchestrator.retrigger_unresponded_messages":
-		cfg.Orchestrator.RetriggerUnrespondedMessages, err = parseBoolean()
-	case "orchestrator.semantic_heartbeat_minutes":
-		cfg.Orchestrator.SemanticHeartbeatMinutes, err = parseInteger(0)
-	case "orchestrator.task_notifications":
-		cfg.Orchestrator.TaskNotifications = strings.ToLower(value)
-	case "orchestrator.max_parallel":
-		cfg.Orchestrator.MaxParallel, err = parseInteger(1)
 	case "extensions.enabled":
 		cfg.Extensions.Enabled, err = parseBoolean()
 	case "extensions.directory":
@@ -347,10 +314,6 @@ func emptyAsInherit(value string) string {
 		return "inherit"
 	}
 	return value
-}
-
-func normalizeTaskReviewMode(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func IsSecretSetting(key string) bool {

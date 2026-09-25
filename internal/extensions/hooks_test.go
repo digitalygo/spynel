@@ -93,98 +93,21 @@ func TestHookCanRewritePayload(t *testing.T) {
 }
 
 func TestDiscoveryRejectsUnsupportedHooks(t *testing.T) {
-	root := t.TempDir()
-	extension := filepath.Join(root, "stale")
-	if err := os.MkdirAll(extension, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	manifest := "name: stale\nhooks:\n  update.before: [\"./hook.sh\"]\n"
-	if err := os.WriteFile(filepath.Join(extension, ManifestName), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := (Runner{Directory: root}).Run(context.Background(), "message.received", nil)
-	if err == nil || !strings.Contains(err.Error(), `unsupported hook "update.before"`) {
-		t.Fatalf("unsupported hook error = %v", err)
-	}
-}
-
-func TestTrackedHookSkipsOnlyHooksWithDurableCompletionReceipts(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fixture")
-	}
-	root := t.TempDir()
-	for _, name := range []string{"first", "second"} {
-		extension := filepath.Join(root, name)
-		if err := os.MkdirAll(extension, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		manifest := "name: " + name + "\nhooks:\n  task.completed: [\"./hook.sh\"]\n"
-		script := "#!/bin/sh\nprintf x >> completed.count\nprintf '%s\\n' '{}'\n"
-		if err := os.WriteFile(filepath.Join(extension, ManifestName), []byte(manifest), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(extension, "hook.sh"), []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	completed := map[string]bool{"first": true}
-	var receipts []string
-	_, err := (Runner{Directory: root, Timeout: time.Second}).RunTracked(context.Background(), "task.completed", map[string]any{"event_id": "stable"}, completed, func(id string) error {
-		receipts = append(receipts, id)
-		completed[id] = true
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(receipts, ",") != "second" {
-		t.Fatalf("completion receipts = %v", receipts)
-	}
-	if _, err := os.Stat(filepath.Join(root, "first", "completed.count")); !os.IsNotExist(err) {
-		t.Fatalf("already-completed hook ran again: %v", err)
-	}
-	count, err := os.ReadFile(filepath.Join(root, "second", "completed.count"))
-	if err != nil || string(count) != "x" {
-		t.Fatalf("incomplete hook count = %q, %v", count, err)
-	}
-}
-
-func TestTrackedHookRetriesWhenCompletionReceiptCannotPersist(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fixture")
-	}
-	root := t.TempDir()
-	extension := filepath.Join(root, "retry")
-	if err := os.MkdirAll(extension, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	manifest := "name: retry\nhooks:\n  task.completed: [\"./hook.sh\"]\n"
-	script := "#!/bin/sh\ninput=$(cat)\nprintf '%s\\n' \"$input\" >> events\nprintf '%s\\n' '{}'\n"
-	if err := os.WriteFile(filepath.Join(extension, ManifestName), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(extension, "hook.sh"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	completed := map[string]bool{}
-	runner := Runner{Directory: root, Timeout: time.Second}
-	payload := map[string]any{"event_id": "stable-completion"}
-	if _, err := runner.RunTracked(context.Background(), "task.completed", payload, completed, func(string) error {
-		return os.ErrPermission
-	}); err == nil {
-		t.Fatal("missing completion-receipt error")
-	}
-	if _, err := runner.RunTracked(context.Background(), "task.completed", payload, completed, func(id string) error {
-		completed[id] = true
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(extension, "events"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(data), "stable-completion") != 2 {
-		t.Fatalf("retried event payloads = %q", data)
+	for _, hook := range []string{"update.before", "task.claimed", "task.completed"} {
+		t.Run(hook, func(t *testing.T) {
+			root := t.TempDir()
+			extension := filepath.Join(root, "stale")
+			if err := os.MkdirAll(extension, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			manifest := "name: stale\nhooks:\n  " + hook + ": [\"./hook.sh\"]\n"
+			if err := os.WriteFile(filepath.Join(extension, ManifestName), []byte(manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := (Runner{Directory: root}).Run(context.Background(), "message.received", nil)
+			if err == nil || !strings.Contains(err.Error(), `unsupported hook "`+hook+`"`) {
+				t.Fatalf("unsupported hook error = %v", err)
+			}
+		})
 	}
 }

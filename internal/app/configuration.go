@@ -88,7 +88,7 @@ func (s *Service) WelcomeScreen() core.Screen {
 func (s *Service) welcomeText(channelName string) string {
 	lines := []string{
 		"👋 Hey, I'm **Spynel** — you can call me **Spy**.", "",
-		"I handle tasks and orchestrate agents. Just tell me your objectives and leave the rest to me.",
+		"I'm your direct line to your coding agent. Tell me what you need and I pass it straight to the agent, then bring the answer back here.",
 		"Feel free to ask me for updates anytime or have me get things done. 👍",
 		"", "- type `/help` if you ever feel lost",
 	}
@@ -628,27 +628,19 @@ func (s *Service) NoticeEvents() <-chan channel.Notice { return s.noticeEvents }
 // intentionally excludes configuration secrets, log bodies, and conversation
 // contents.
 type SharedState struct {
-	Title                string                     `json:"title"`
-	Theme                string                     `json:"theme"`
-	Connections          []channel.ConnectionStatus `json:"connections"`
-	Pairings             []channel.PairingEvent     `json:"pairings"`
-	Runtime              core.RuntimeStatus         `json:"runtime"`
-	DurableWork          core.DurableWorkCounts     `json:"durable_work"`
-	WorkDiagnostics      []string                   `json:"work_count_diagnostics,omitempty"`
-	NoticeSequence       uint64                     `json:"notice_sequence"`
-	Notice               channel.Notice             `json:"notice"`
-	ConversationRecovery RecoveryStatus             `json:"conversation_recovery"`
-	ConversationActivity int                        `json:"conversation_activity,omitempty"`
+	Title          string                     `json:"title"`
+	Theme          string                     `json:"theme"`
+	Connections    []channel.ConnectionStatus `json:"connections"`
+	Pairings       []channel.PairingEvent     `json:"pairings"`
+	Runtime        core.RuntimeStatus         `json:"runtime"`
+	NoticeSequence uint64                     `json:"notice_sequence"`
+	Notice         channel.Notice             `json:"notice"`
 }
 
 func (s *Service) SharedState() SharedState {
-	work := s.Orchestrator.WorkStatus()
 	state := SharedState{
 		Title: s.currentTitle(), Theme: s.Settings.Snapshot().Channels.TUI.Theme,
-		Runtime:              s.Runtime.Status(),
-		DurableWork:          core.DurableWorkCounts{Tasks: work.TasksActive, Goals: work.GoalsActive},
-		WorkDiagnostics:      append([]string(nil), work.CountDiagnostics...),
-		ConversationRecovery: s.RecoveryStatus(),
+		Runtime: s.Runtime.Status(),
 	}
 	s.connectionMu.RLock()
 	for _, name := range []string{"telegram", "whatsapp"} {
@@ -671,18 +663,10 @@ func (s *Service) SharedState() SharedState {
 	return state
 }
 
-// SharedStateForInstance adds only the caller TUI's selected-conversation
-// activity count. It never exposes conversation identities on shared state.
-func (s *Service) SharedStateForInstance(instanceID string) SharedState {
-	state := s.SharedState()
-	conversation := s.liveTUIConversation(instanceID, time.Now().UTC())
-	if conversation == "" {
-		return state
-	}
-	s.conversationActivityMu.Lock()
-	state.ConversationActivity = s.conversationActivity["tui/"+conversation]
-	s.conversationActivityMu.Unlock()
-	return state
+// SharedStateForInstance returns the bounded shared state for one caller. It
+// never exposes conversation identities or per-conversation contents.
+func (s *Service) SharedStateForInstance(string) SharedState {
+	return s.SharedState()
 }
 
 func (s *Service) harnessCommand(message core.Message, remainder string, emit core.Emit) error {
@@ -1277,14 +1261,6 @@ func (s *Service) ApplySettings(values map[string]string) ([]config.Setting, err
 	if themeChanged {
 		s.publishTheme(selectedTheme)
 	}
-	if !reflect.DeepEqual(previous.Orchestrator, next.Orchestrator) || previous.Workspace.CleanupRetentionDays != next.Workspace.CleanupRetentionDays {
-		s.Orchestrator.ApplyRuntimeConfig(next)
-		if !previous.Orchestrator.RetriggerUnrespondedMessages && next.Orchestrator.RetriggerUnrespondedMessages {
-			s.triggerRecoveryScan("configuration")
-		}
-	} else if harnessAgentPolicyChanged(previous.Harness, next.Harness) {
-		s.Orchestrator.ApplyHarnessConfig(next.Harness)
-	}
 	s.Runtime.LogEvent("info", "config", "persisted", fmt.Sprintf("Configuration persisted (%d settings changed)", len(changed)))
 	if startupRequested {
 		if err := s.Startup.Sync(next, next.Startup.Enabled); err != nil {
@@ -1492,14 +1468,6 @@ func harnessRuntimeChanged(previous, next config.Harness) bool {
 	return previous.ACPCommand != next.ACPCommand || !reflect.DeepEqual(previous.ACPArgs, next.ACPArgs)
 }
 
-func harnessAgentPolicyChanged(previous, next config.Harness) bool {
-	return previous.ChatAgentPrefix != next.ChatAgentPrefix ||
-		previous.DeveloperAgentPrefix != next.DeveloperAgentPrefix ||
-		previous.ReviewerAgentPrefix != next.ReviewerAgentPrefix ||
-		previous.HeartbeatAgentPrefix != next.HeartbeatAgentPrefix ||
-		previous.Reviews != next.Reviews
-}
-
 func (s *Service) reconfigureHarness(cfg config.Config) error {
 	runtimeHarness, ok := s.Harness.(interface {
 		HarnessConfig() harness.HarnessConfig
@@ -1686,14 +1654,10 @@ func settingsScreen(cfg config.Config, section string) core.Screen {
 			label = "context messages"
 		case "harness.sandbox":
 			label = "agent filesystem access"
-		case "harness.reviews":
-			label = "task reviews"
 		case "workspace.history_char_limit":
 			label = "context character limit"
 		case "workspace.attachment_max_mb":
 			label = "attachment size limit (MB)"
-		case "orchestrator.retrigger_unresponded_messages":
-			label = "re-trigger unresponded messages"
 		}
 		value := setting.Value
 		configured := false

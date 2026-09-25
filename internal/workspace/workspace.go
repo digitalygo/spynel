@@ -25,33 +25,25 @@ type fileSpec struct {
 	Executable bool
 }
 
+// files lists every workspace file materialized from the embedded templates.
+// The retired task/goal workflow prompts, the retired chat prompt, workflow
+// AGENTS contracts, and persistent role instructions are intentionally
+// absent: new and upgraded workspaces never recreate them, while existing
+// user-owned copies stay untouched and inert.
 var files = []fileSpec{
 	{Path: config.FileName, Template: "templates/config.yaml"},
 	{Path: ".spynel/AGENTS.md", Template: "templates/workspace-AGENTS.md"},
-	{Path: ".spynel/tasks/AGENTS.md", Template: "templates/tasks-AGENTS.md"},
-	{Path: ".spynel/goals/AGENTS.md", Template: "templates/goals-AGENTS.md"},
-	{Path: ".spynel/prompts/chat.md", Template: "templates/chat.md"},
-	{Path: ".spynel/prompts/create-task.md", Template: "templates/create-task.md"},
-	{Path: ".spynel/prompts/create-goal.md", Template: "templates/create-goal.md"},
-	{Path: ".spynel/prompts/task.md", Template: "templates/task.md"},
-	{Path: ".spynel/prompts/goal.md", Template: "templates/goal.md"},
-	{Path: ".spynel/prompts/goal-review.md", Template: "templates/goal-review.md"},
-	{Path: ".spynel/prompts/recovery.md", Template: "templates/recovery.md"},
-	{Path: ".spynel/prompts/review.md", Template: "templates/review.md"},
-	{Path: ".spynel/prompts/heartbeat.md", Template: "templates/heartbeat.md"},
-	{Path: ".spynel/prompts/notification.md", Template: "templates/notification.md"},
-	{Path: ".spynel/instructions/agent-chat.md", Template: "templates/agent-chat.md"},
-	{Path: ".spynel/instructions/agent-developer.md", Template: "templates/agent-developer.md"},
-	{Path: ".spynel/instructions/agent-reviewer.md", Template: "templates/agent-reviewer.md"},
-	{Path: ".spynel/instructions/agent-notification.md", Template: "templates/agent-notification.md"},
-	{Path: ".spynel/instructions/agent-heartbeat.md", Template: "templates/agent-heartbeat.md"},
 	{Path: ".spynel/extensions/README.md", Template: "templates/extensions.md"},
 }
 
+// directories lists the current runtime directories created by Init and
+// Upgrade. `.spynel/runtime` itself stays the generic runtime root for
+// instance election state, logs, the outbox, and the cleanup lock. The
+// retired `.spynel/instructions` and `.spynel/runtime/leases` directories
+// are intentionally absent: they are never created, validated, inspected,
+// or followed, while existing legacy copies stay untouched and inert.
 var directories = []string{
-	".spynel/history", ".spynel/jobs", ".spynel/attachments", ".spynel/runtime/leases", ".spynel/extensions", ".spynel/themes", ".spynel/instructions",
-	".spynel/tasks/todo", ".spynel/tasks/working", ".spynel/tasks/review", ".spynel/tasks/reviewing", ".spynel/tasks/waiting", ".spynel/tasks/done", ".spynel/tasks/failed", ".spynel/tasks/cancelled", ".spynel/tasks/archive",
-	".spynel/goals/proposed", ".spynel/goals/planning", ".spynel/goals/active", ".spynel/goals/review", ".spynel/goals/reviewing", ".spynel/goals/waiting", ".spynel/goals/done", ".spynel/goals/abandoned",
+	".spynel/history", ".spynel/jobs", ".spynel/attachments", ".spynel/runtime", ".spynel/extensions", ".spynel/themes",
 }
 
 func ensureRealDirectory(path, description string) error {
@@ -76,14 +68,6 @@ func ensureRealDirectory(path, description string) error {
 	return nil
 }
 
-func ensureInstructionBoundary(root string) error {
-	stateRoot := filepath.Join(root, ".spynel")
-	if err := ensureRealDirectory(stateRoot, ".spynel state path"); err != nil {
-		return err
-	}
-	return ensureRealDirectory(filepath.Join(stateRoot, "instructions"), ".spynel/instructions path")
-}
-
 func Init(root string, force bool) error {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -101,13 +85,7 @@ func Init(root string, force bool) error {
 			return errors.New(".spynel/config.yaml already exists (use --force to restore missing templates)")
 		}
 	}
-	if err := ensureInstructionBoundary(abs); err != nil {
-		return err
-	}
 	for _, dir := range directories {
-		if dir == ".spynel/instructions" {
-			continue
-		}
 		if err := os.MkdirAll(filepath.Join(abs, filepath.FromSlash(dir)), 0o700); err != nil {
 			return err
 		}
@@ -165,7 +143,10 @@ func Init(root string, force bool) error {
 
 // Upgrade restores missing runtime directories and embedded support files. It
 // preserves current configuration and user-owned prompts, instructions,
-// themes, and extensions. Unused configuration keys disappear on the next save.
+// themes, and extensions. Retired task/goal workflow files are never
+// recreated, the retired instructions and lease directories are never
+// created, inspected, or followed, and unused configuration keys disappear
+// only on the next save.
 func Upgrade(root string) error {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -174,13 +155,10 @@ func Upgrade(root string) error {
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return err
 	}
-	if err := ensureInstructionBoundary(abs); err != nil {
+	if err := ensureRealDirectory(filepath.Join(abs, ".spynel"), ".spynel state path"); err != nil {
 		return err
 	}
 	for _, dir := range directories {
-		if dir == ".spynel/instructions" {
-			continue
-		}
 		if err := os.MkdirAll(filepath.Join(abs, filepath.FromSlash(dir)), 0o700); err != nil {
 			return err
 		}

@@ -2,26 +2,14 @@ package app
 
 import (
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/digitalygo/spynel/internal/core"
-	"github.com/digitalygo/spynel/internal/orchestrator"
 	"github.com/digitalygo/spynel/internal/shortid"
 )
 
-const (
-	maxJobProgressEntries = 3
-	maxJobProgressRunes   = 320
-	maxJobProgressTotal   = 900
-	maxJobMetadataRunes   = 160
-	maxJobDocumentBytes   = 2 << 20
-)
+const maxJobMetadataRunes = 160
 
 func (s *Service) jobsRecentCommand(message core.Message, emit core.Emit) error {
 	items, err := s.Runtime.RecentArchivedJobs(jobArchiveRecentLimit)
@@ -51,15 +39,6 @@ func (s *Service) archivedJobInfoCommand(message core.Message, number int, emit 
 	lines := []string{fmt.Sprintf("# Job %d", item.Number), "", "- Title: " + safeJobText(item.Title, maxJobMetadataRunes), "- Type: " + safeJobText(item.Kind, 80), "- Origin: " + safeJobText(item.Origin, 80), "- State: " + safeJobText(item.State, 80), "- Started: " + item.StartedAt.UTC().Format(time.RFC3339Nano)}
 	if item.Provider != "" {
 		lines = append(lines, "- Provider: "+safeJobText(item.Provider, 80))
-	}
-	if item.WorkID != "" {
-		lines = append(lines, "- Work ID: "+safeJobText(item.WorkID, maxJobMetadataRunes))
-	}
-	if item.ParentID != "" {
-		lines = append(lines, "- Parent: "+safeJobText(item.ParentID, maxJobMetadataRunes))
-	}
-	if item.Phase != "" {
-		lines = append(lines, "- Phase: "+safeJobText(item.Phase, 80))
 	}
 	if !item.EndedAt.IsZero() {
 		lines = append(lines, "- Ended: "+item.EndedAt.UTC().Format(time.RFC3339Nano), "- Duration: "+item.EndedAt.Sub(item.StartedAt).Round(time.Millisecond).String())
@@ -99,8 +78,7 @@ func (s *Service) jobInfoCommand(message core.Message, id int, emit core.Emit) e
 		return s.archivedJobInfoCommand(message, id, emit)
 	}
 
-	lease, hasLease := s.Orchestrator.LeaseForSession(job.SessionKey)
-	text := s.formatJobInfo(job, lease, hasLease)
+	text := s.formatJobInfo(job)
 
 	// Durable reads and harness completion can race. Never present a stale job
 	// as active after it has left the process-local registry.
@@ -111,7 +89,7 @@ func (s *Service) jobInfoCommand(message core.Message, id int, emit core.Emit) e
 	return s.localReply(message, text, emit)
 }
 
-func (s *Service) formatJobInfo(job Job, lease orchestrator.Lease, hasLease bool) string {
+func (s *Service) formatJobInfo(job Job) string {
 	now := time.Now().UTC()
 	kind := job.Kind
 	if kind == "" {
@@ -140,9 +118,6 @@ func (s *Service) formatJobInfo(job Job, lease orchestrator.Lease, hasLease bool
 			"- Durable lifetime: "+shortDuration(now.Sub(first)),
 			fmt.Sprintf("- Provider steps (▶): %d", max(1, job.ProviderIterations)),
 		)
-		if job.ImplementationAttempts > 0 {
-			lines = append(lines, fmt.Sprintf("- Implementation attempts (↻): %d", job.ImplementationAttempts))
-		}
 	} else {
 		lines = append(lines, "- Provider steps (▶): 1 (live conversation)")
 	}
@@ -160,125 +135,13 @@ func (s *Service) formatJobInfo(job Job, lease orchestrator.Lease, hasLease bool
 		}
 		lines = append(lines, "- Reconnect attempt: "+reconnect)
 	}
-	if job.RecoveryCount > 0 {
-		lines = append(lines, fmt.Sprintf("- Recovery count: %d", job.RecoveryCount))
-	}
 	if job.StatusDetail != "" {
 		lines = append(lines, "- Detail: "+safeJobText(boundJobStatusDetail(job.StatusDetail), maxJobMetadataRunes))
 	}
 	if thread := shortid.Display(s.Harness.ThreadID(job.SessionKey)); thread != "" {
 		lines = append(lines, "- Execution: `"+safeJobText(thread, maxJobMetadataRunes)+"`")
 	}
-	leaseState, leasePhase, leaseHeartbeat := job.LeaseState, job.LeasePhase, job.LeaseHeartbeatAt
-	if leasePhase != "" {
-		lines = append(lines, "- Phase: "+safeJobText(leasePhase, maxJobMetadataRunes))
-	}
-	if leaseState != "" {
-		line := "- Lease: " + safeJobText(leaseState, maxJobMetadataRunes)
-		if !leaseHeartbeat.IsZero() {
-			age := now.Sub(leaseHeartbeat)
-			if age < 0 {
-				age = 0
-			}
-			line += " · heartbeat " + shortDuration(age) + " ago · " + leaseHeartbeat.UTC().Format(time.RFC3339)
-		}
-		lines = append(lines, line)
-	}
-
-	durableFile := job.DurableFile
-	if hasLease && lease.File != "" {
-		durableFile = lease.File
-	}
-	if durableFile == "" {
-		lines = append(lines, "", "This job has no linked Markdown task or goal.")
-		return strings.Join(lines, "\n")
-	}
-	lines = append(lines, "", "## Durable work", "", "- Source: "+safeJobText(filepath.Base(durableFile), maxJobMetadataRunes))
-	document, err := s.readJobDocument(durableFile)
-	if err != nil {
-		lines = append(lines, "- Details: unavailable (the linked Markdown document could not be parsed)")
-		return strings.Join(lines, "\n")
-	}
-	for _, field := range []struct {
-		key   string
-		label string
-	}{
-		{"title", "Title"}, {"id", "Durable ID"}, {"status", "Status"},
-		{"phase", "Document phase"}, {"round", "Round"},
-		{"created_at", "Created"}, {"updated_at", "Updated"},
-	} {
-		if value, ok := safeFrontMatterValue(document.FrontMatter[field.key]); ok {
-			lines = append(lines, "- "+field.label+": "+safeJobText(value, maxJobMetadataRunes))
-		}
-	}
-	progress := newestProgressEntries(document.Body)
-	if len(progress) > 0 {
-		lines = append(lines, "", fmt.Sprintf("## Recent progress (newest %d)", len(progress)), "")
-		for _, entry := range progress {
-			lines = append(lines, "- "+entry)
-		}
-	}
 	return strings.Join(lines, "\n")
-}
-
-func safeFrontMatterValue(value any) (string, bool) {
-	switch typed := value.(type) {
-	case string:
-		if strings.TrimSpace(typed) == "" {
-			return "", false
-		}
-		return typed, true
-	case int:
-		return strconv.Itoa(typed), true
-	case int64:
-		return strconv.FormatInt(typed, 10), true
-	case float64:
-		return strconv.FormatFloat(typed, 'f', -1, 64), true
-	case time.Time:
-		return typed.UTC().Format(time.RFC3339), true
-	default:
-		return "", false
-	}
-}
-
-func newestProgressEntries(body string) []string {
-	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
-	inProgress := false
-	entries := make([]string, 0)
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.EqualFold(trimmed, "## Progress") {
-			inProgress = true
-			continue
-		}
-		if inProgress && strings.HasPrefix(trimmed, "## ") {
-			break
-		}
-		if !inProgress || trimmed == "" {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-			entries = append(entries, strings.TrimSpace(trimmed[2:]))
-		} else if len(entries) > 0 && (len(line) > 0 && unicode.IsSpace(rune(line[0]))) {
-			entries[len(entries)-1] += " " + trimmed
-		}
-	}
-
-	result := make([]string, 0, maxJobProgressEntries)
-	total := 0
-	for index := len(entries) - 1; index >= 0 && len(result) < maxJobProgressEntries; index-- {
-		entry := safeJobText(entries[index], maxJobProgressRunes)
-		if total+len([]rune(entry)) > maxJobProgressTotal {
-			remaining := maxJobProgressTotal - total
-			if remaining <= 1 {
-				break
-			}
-			entry = boundJobText(entry, remaining)
-		}
-		result = append(result, entry)
-		total += len([]rune(entry))
-	}
-	return result
 }
 
 func safeJobText(value string, limit int) string {
@@ -294,20 +157,4 @@ func boundJobText(value string, limit int) string {
 		return value
 	}
 	return string(runes[:limit-1]) + "…"
-}
-
-func readBoundedJobDocument(path string) (orchestrator.Document, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return orchestrator.Document{}, err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxJobDocumentBytes+1))
-	if err != nil {
-		return orchestrator.Document{}, err
-	}
-	if len(data) > maxJobDocumentBytes {
-		return orchestrator.Document{}, fmt.Errorf("Markdown document exceeds %d-byte inspection limit", maxJobDocumentBytes)
-	}
-	return orchestrator.ParseDocument(data)
 }

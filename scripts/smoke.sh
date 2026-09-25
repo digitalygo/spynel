@@ -15,45 +15,59 @@ SPYNEL_DEV_BIN_DIR="$dev_bin_dir" "$script_dir/install-dev.sh" >/dev/null
 test -x "$dev_bin_dir/spynel"
 "$dev_bin_dir/spynel" version >/dev/null
 
+# `docs` is workspace-independent and must expose exactly the retained topic
+# set, with no retired task/goal workflow topics.
 docs_index=$(cd "$smoke_dir" && "$binary" docs)
-printf '%s\n' "$docs_index" | grep -q '`goals`'
-docs_json=$(cd "$smoke_dir" && "$binary" docs search review --format json)
+expected_docs_topics=$(printf '%s\n' architecture channels commands configuration harnesses instances-primary integration jobs logs notifications security troubleshooting workspace-state | sort)
+docs_topics=$(printf '%s\n' "$docs_index" | sed -n 's/^- `\([^`]*\)`.*/\1/p' | sort)
+if [ "$docs_topics" != "$expected_docs_topics" ]; then
+  echo "documentation index does not match the exact retained topic set:" >&2
+  printf '%s\n' "$docs_topics" >&2
+  exit 1
+fi
+docs_json=$(cd "$smoke_dir" && "$binary" docs search session --format json)
 printf '%s\n' "$docs_json" | grep -q '"schema_version": "spynel.docs/v1"'
+
+# CLI help advertises the retained job controls only, with no workflow copy.
+help_output=$("$binary" help)
+printf '%s\n' "$help_output" | grep -q 'spynel job info N'
+printf '%s\n' "$help_output" | grep -q 'spynel job output N'
+printf '%s\n' "$help_output" | grep -q 'spynel job kill N'
+for copy in 'job message' 'job ping' 'spynel task' 'spynel goal' 'spynel instructions' 'spynel run' 'orchestration'; do
+  if printf '%s\n' "$help_output" | grep -q "$copy"; then
+    echo "retired or stale copy \"$copy\" remains in CLI help" >&2
+    exit 1
+  fi
+done
 
 "$binary" init --no-start --dir "$smoke_dir"
 (cd "$smoke_dir" && "$binary" config)
-instructions_output=$("$binary" instructions --config "$smoke_dir/.spynel/config.yaml")
-printf '%s\n' "$instructions_output" | grep -q 'chat: .spynel/instructions/agent-chat.md — valid'
-printf '%s\n' "$instructions_output" | grep -q 'heartbeat: .spynel/instructions/agent-heartbeat.md — valid'
-reviewed_task=$(cd "$smoke_dir" && "$binary" task "smoke test task creation")
-direct_task=$(cd "$smoke_dir" && "$binary" task --no-review "collect smoke status")
-"$binary" task inspect "$reviewed_task" | grep -q 'Review required: true'
-"$binary" task inspect "$direct_task" | grep -q 'Review required: false'
-(cd "$smoke_dir" && "$binary" goal "smoke test goal creation")
 
-tasks_output=$(cd "$smoke_dir" && "$binary" tasks --detail --limit 2)
-printf '%s\n' "$tasks_output" | grep -q '# Tasks · open'
-printf '%s\n' "$tasks_output" | grep -q 'review required'
-printf '%s\n' "$tasks_output" | grep -q 'direct low-risk completion allowed'
-tasks_recent=$(cd "$smoke_dir" && "$binary" tasks recent --limit 1)
-printf '%s\n' "$tasks_recent" | grep -q '# Tasks · recent 3d'
-goals_output=$(cd "$smoke_dir" && "$binary" goals --limit 1)
-printf '%s\n' "$goals_output" | grep -q '# Goals · open'
-printf '%s\n' "$goals_output" | grep -q 'smoke test goal creation'
-goals_recent=$(cd "$smoke_dir" && "$binary" goals recent --limit 1)
-printf '%s\n' "$goals_recent" | grep -q '# Goals · recent 7d'
-for workflow_view in open active review waiting done failed all; do
-  tasks_view=$(cd "$smoke_dir" && "$binary" tasks "$workflow_view" --limit 1)
-  printf '%s\n' "$tasks_view" | grep -q "# Tasks · $workflow_view"
-  goals_view=$(cd "$smoke_dir" && "$binary" goals "$workflow_view" --limit 1)
-  printf '%s\n' "$goals_view" | grep -q "# Goals · $workflow_view"
+# Fresh initialization creates the current workspace contract only; retired
+# task, goal, prompt, and instruction workflow assets are never recreated.
+test -f "$smoke_dir/.spynel/config.yaml"
+test ! -e "$smoke_dir/spynel.yaml"
+if grep -q 'state_dir:' "$smoke_dir/.spynel/config.yaml"; then
+  echo "canonical config unexpectedly contains workspace.state_dir" >&2
+  exit 1
+fi
+if grep -Eq '^[[:space:]]*(reviews|chat_agent_prefix|developer_agent_prefix|reviewer_agent_prefix|heartbeat_agent_prefix):' "$smoke_dir/.spynel/config.yaml"; then
+  echo "canonical config unexpectedly retains retired workflow keys" >&2
+  exit 1
+fi
+test -f "$smoke_dir/.spynel/AGENTS.md"
+test ! -d "$smoke_dir/.spynel/prompts"
+test ! -d "$smoke_dir/.spynel/tasks"
+test ! -d "$smoke_dir/.spynel/goals"
+if [ -d "$smoke_dir/.spynel/instructions" ]; then
+  test "$(find "$smoke_dir/.spynel/instructions" -type f | wc -l)" -eq 0
+fi
+for retired in instructions tasks goals task goal; do
+  if (cd "$smoke_dir" && "$binary" "$retired") >/dev/null 2>&1; then
+    echo "retired workflow command $retired unexpectedly succeeded" >&2
+    exit 1
+  fi
 done
-tasks_json=$(cd "$smoke_dir" && "$binary" tasks --json failed --limit 1)
-printf '%s\n' "$tasks_json" | grep -q '"kind":"final"'
-printf '%s\n' "$tasks_json" | grep -q '# Tasks · failed'
-goals_json=$(cd "$smoke_dir" && "$binary" goals --json review --detail --limit 1)
-printf '%s\n' "$goals_json" | grep -q '"kind":"final"'
-printf '%s\n' "$goals_json" | grep -q '# Goals · review'
 
 status_json=$("$binary" status --config "$smoke_dir/.spynel/config.yaml" --conversation smoke --json)
 printf '%s\n' "$status_json" | grep -q '"harness_state"'
@@ -61,8 +75,17 @@ printf '%s\n' "$status_json" | grep -q '"connections"'
 
 command_output=$("$binary" command --config "$smoke_dir/.spynel/config.yaml" --conversation smoke help commands)
 printf '%s\n' "$command_output" | grep -q '/status'
-printf '%s\n' "$command_output" | grep -q '/tasks'
-printf '%s\n' "$command_output" | grep -q '/goals'
+printf '%s\n' "$command_output" | grep -q '/jobs'
+printf '%s\n' "$command_output" | grep -q '/job info'
+printf '%s\n' "$command_output" | grep -q '/job output'
+printf '%s\n' "$command_output" | grep -q '/job kill'
+for copy in '/tasks' '/goals'; do
+  if printf '%s\n' "$command_output" | grep -q "$copy"; then
+    echo "retired workflow slash command $copy remains in the catalog" >&2
+    exit 1
+  fi
+done
+
 conversation_json=$("$binary" conversations list --config "$smoke_dir/.spynel/config.yaml" --json)
 printf '%s\n' "$conversation_json" | grep -q '"conversation":"smoke"'
 "$binary" conversations show --config "$smoke_dir/.spynel/config.yaml" --tail 5 cli smoke >/dev/null
@@ -78,31 +101,32 @@ if "$binary" followup --config "$smoke_dir/.spynel/config.yaml" --conversation s
   exit 1
 fi
 
-test -f "$smoke_dir/.spynel/config.yaml"
-test ! -e "$smoke_dir/spynel.yaml"
-if grep -q 'state_dir:' "$smoke_dir/.spynel/config.yaml"; then
-  echo "canonical config unexpectedly contains workspace.state_dir" >&2
+# Existing retired workflow documents survive an upgrade byte-for-byte and
+# never surface through retained commands.
+upgrade_dir="$smoke_dir/upgrade"
+"$binary" init --no-start --dir "$upgrade_dir" >/dev/null
+mkdir -p "$upgrade_dir/.spynel/tasks/todo" "$upgrade_dir/.spynel/goals/proposed" "$upgrade_dir/.spynel/prompts" "$upgrade_dir/.spynel/instructions"
+sentinel='RETIRED WORKFLOW SENTINEL'
+for legacy in tasks/todo/legacy-task.md goals/proposed/legacy-goal.md prompts/chat.md instructions/agent-chat.md; do
+  printf '%s\n' "$sentinel" > "$upgrade_dir/.spynel/$legacy"
+done
+legacy_before=$(cd "$upgrade_dir/.spynel" && cksum tasks/todo/legacy-task.md goals/proposed/legacy-goal.md prompts/chat.md instructions/agent-chat.md)
+upgrade_status=$("$binary" status --config "$upgrade_dir/.spynel/config.yaml" --json)
+legacy_after=$(cd "$upgrade_dir/.spynel" && cksum tasks/todo/legacy-task.md goals/proposed/legacy-goal.md prompts/chat.md instructions/agent-chat.md)
+if [ "$legacy_before" != "$legacy_after" ]; then
+  echo "upgrade modified retired workflow documents" >&2
   exit 1
 fi
-for prefix in chat developer reviewer heartbeat; do
-  if ! grep -q "^[[:space:]]*${prefix}_agent_prefix: \"\"$" "$smoke_dir/.spynel/config.yaml"; then
-    echo "canonical config does not default ${prefix}_agent_prefix to empty" >&2
-    exit 1
-  fi
-done
-test -f "$smoke_dir/.spynel/AGENTS.md"
-test -f "$smoke_dir/.spynel/prompts/create-task.md"
-test -f "$smoke_dir/.spynel/prompts/create-goal.md"
-test -f "$smoke_dir/.spynel/prompts/goal-review.md"
-test "$(find "$smoke_dir/.spynel/instructions" -type f -name '*.md' | wc -l)" -eq 5
-test "$(find "$smoke_dir/.spynel/tasks/todo" -type f -name '*.md' | wc -l)" -eq 2
-test "$(find "$smoke_dir/.spynel/goals/proposed" -type f -name '*.md' | wc -l)" -eq 1
-
-for status in todo working review reviewing waiting done failed cancelled; do
-  test -d "$smoke_dir/.spynel/tasks/$status"
-done
-for status in proposed planning active review reviewing waiting done abandoned; do
-  test -d "$smoke_dir/.spynel/goals/$status"
-done
+if printf '%s\n' "$upgrade_status" | grep -q "$sentinel"; then
+  echo "retired workflow documents leaked into retained command output" >&2
+  exit 1
+fi
+test ! -e "$upgrade_dir/.spynel/prompts/create-task.md"
+test ! -e "$upgrade_dir/.spynel/prompts/create-goal.md"
+test ! -e "$upgrade_dir/.spynel/prompts/goal-review.md"
+test "$(find "$upgrade_dir/.spynel/tasks" -type f | wc -l)" -eq 1
+test "$(find "$upgrade_dir/.spynel/goals" -type f | wc -l)" -eq 1
+test "$(find "$upgrade_dir/.spynel/instructions" -type f | wc -l)" -eq 1
+(cd "$upgrade_dir" && "$binary" config) >/dev/null
 
 echo "Spynel smoke test passed: $smoke_dir"

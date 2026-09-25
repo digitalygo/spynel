@@ -28,10 +28,8 @@ import (
 	"github.com/digitalygo/spynel/internal/harness"
 	"github.com/digitalygo/spynel/internal/history"
 	"github.com/digitalygo/spynel/internal/instance"
-	"github.com/digitalygo/spynel/internal/instructions"
 	"github.com/digitalygo/spynel/internal/localapi"
 	"github.com/digitalygo/spynel/internal/media"
-	"github.com/digitalygo/spynel/internal/orchestrator"
 	startupmanager "github.com/digitalygo/spynel/internal/startup"
 	"github.com/digitalygo/spynel/internal/theme"
 	"github.com/digitalygo/spynel/internal/updater"
@@ -178,8 +176,6 @@ func run(args []string, version string) error {
 		return err
 	case "docs":
 		return runDocsCommand(args[1:], os.Stdout)
-	case "instructions":
-		return runInstructionsCommand(args[1:], os.Stdout)
 	case "version", "--version", "-v":
 		flags := flag.NewFlagSet("version", flag.ContinueOnError)
 		quiet := flags.Bool("quiet", false, "verify execution without printing the version")
@@ -222,17 +218,6 @@ func run(args []string, version string) error {
 			return err
 		}
 		return runServerWithSocket(*configPath, *withTUI, version, append([]string(nil), args...), *socket)
-	case "run":
-		flags := flag.NewFlagSet("run", flag.ContinueOnError)
-		configPath := flags.String("config", "", "path to .spynel/config.yaml")
-		once := flags.Bool("once", false, "run one scan and wait for dispatched turns")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		if !*once {
-			return errors.New("run currently requires --once; use 'spynel serve' for the continuous loop")
-		}
-		return runOnce(*configPath, version)
 	case "send":
 		return runSendCommand(args[0], args[1:], version, false)
 	case "followup":
@@ -245,48 +230,10 @@ func run(args []string, version string) error {
 		return runFrameworkCLICommand("", args[1:], version)
 	case "status":
 		return runStatusCLICommand(args[1:], version, os.Stdout)
-	case "jobs", "tasks", "goals", "job", "log", "logs", "stop", "new", "clear", "history", "harness", "model", "effort", "speed", "telegram", "restart":
+	case "jobs", "job", "log", "logs", "stop", "new", "clear", "history", "harness", "model", "effort", "speed", "telegram", "restart":
 		return runFrameworkCLICommand(args[0], args[1:], version)
 	case "conversation", "conversations":
 		return runConversationCommand(args[1:], os.Stdout)
-	case "task", "todo", "goal":
-		if len(args) >= 2 && args[0] != "goal" && args[1] == "inspect" {
-			if len(args) != 3 {
-				return errors.New("usage: spynel task inspect FILE")
-			}
-			return inspectTaskPolicy(args[2], os.Stdout)
-		}
-		noReview := false
-		requestArgs := args[1:]
-		if len(requestArgs) > 0 && requestArgs[0] == "--no-review" && args[0] != "goal" {
-			noReview = true
-			requestArgs = requestArgs[1:]
-		}
-		if len(requestArgs) == 0 {
-			return fmt.Errorf("usage: spynel %s [--no-review] <request>", args[0])
-		}
-		cfg, err := config.Load("")
-		if err != nil {
-			return err
-		}
-		route := "tasks"
-		if args[0] == "goal" {
-			route = "goals"
-		}
-		request := strings.Join(requestArgs, " ")
-		if route == "tasks" {
-			_, _ = history.New(cfg.StatePath("history")).Append("cli", "local", history.Entry{Role: "user", Sender: "cli", Content: "/task " + request})
-		}
-		options := orchestrator.CreateOptions{}
-		if route == "tasks" {
-			options = orchestrator.CreateOptions{Notify: true, Origin: "cli/local", Outcomes: []string{"done", "failed", "waiting", "cancelled"}, NoReview: noReview}
-		}
-		path, err := orchestrator.CreateWithOptions(cfg, route, request, "", options)
-		if err != nil {
-			return err
-		}
-		fmt.Println(path)
-		return nil
 	case "config":
 		if len(args) > 1 {
 			return runFrameworkCLICommand("config", args[1:], version)
@@ -436,57 +383,6 @@ func runBareInteractiveWithRuntime(version string, runtime bareInteractiveRuntim
 	}
 }
 
-func inspectTaskPolicy(path string, output io.Writer) error {
-	document, err := orchestrator.ReadDocument(path)
-	if err != nil {
-		return err
-	}
-	policy, policyErr := orchestrator.TaskPolicyFromDocument(document)
-	effective := policy.ReviewRequired
-	if configPath, findErr := config.Find(filepath.Dir(path)); findErr == nil {
-		if cfg, loadErr := config.Load(configPath); loadErr == nil {
-			effective = cfg.Harness.EffectiveTaskReviewRequired(policy.ReviewRequired)
-			_, _ = fmt.Fprintln(output, "Configured task review mode: "+cfg.Harness.Reviews)
-		}
-	}
-	_, _ = fmt.Fprintf(output, "Review required: %t\n", effective)
-	if policyErr != nil {
-		_, _ = fmt.Fprintln(output, "Policy warning: "+policyErr.Error()+"; treated as review required")
-	}
-	return nil
-}
-
-func runInstructionsCommand(args []string, output io.Writer) error {
-	flags := flag.NewFlagSet("instructions", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	configPath := flags.String("config", "", "path to .spynel/config.yaml")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("usage: spynel instructions [--config PATH]")
-	}
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		return err
-	}
-	invalid := false
-	for _, status := range instructions.Inspect(cfg.StatePath()) {
-		state := "missing (valid empty fallback)"
-		if status.Present && status.Valid {
-			state = fmt.Sprintf("valid (%d bytes)", status.Bytes)
-		} else if status.Error != "" {
-			state = "invalid (" + status.Error + ")"
-			invalid = true
-		}
-		_, _ = fmt.Fprintf(output, "%s: %s — %s\n", status.Role, status.RelativePath, state)
-	}
-	if invalid {
-		return errors.New("one or more persistent instruction files are unsafe or invalid")
-	}
-	return nil
-}
-
 type restartRequest struct {
 	args []string
 }
@@ -559,7 +455,7 @@ func runServer(configPath string, withTUI bool, version string, restartArgs []st
 
 func runServerWithSocket(configPath string, withTUI bool, version string, restartArgs []string, socketPath string) error {
 	// This process may own the shared primary even before the TUI enters raw
-	// mode. Shell suspension must not pause its API, heartbeat and agent jobs.
+	// mode. Shell suspension must not pause its API and agent jobs.
 	defer preventJobSuspension()()
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -738,8 +634,8 @@ func runServerWithSocket(configPath string, withTUI bool, version string, restar
 		if err != nil {
 			return serverResult(fmt.Errorf("load initial TUI screen: %w", err))
 		}
-		stateEvents := startTUIStatePolling(ctx, client, shared, cfg.StatePath("themes"), conversation)
-		notificationEvents := watchTaskNotifications(ctx, historyPath, historyOffset)
+		stateEvents := startTUIStatePolling(ctx, client, shared, cfg.StatePath("themes"))
+		notificationEvents := watchNotifications(ctx, historyPath, historyOffset)
 		updateManager := updater.Detect(version)
 		if updateManager.InstallRoot != "" {
 			updateManager.PeriodicChecks = standaloneChecksEligible(restartArgs, interactiveTerminal())
@@ -773,13 +669,10 @@ func runServerWithSocket(configPath string, withTUI bool, version string, restar
 			PairingEvents:      stateEvents.pairings,
 			NoticeEvents:       stateEvents.notices,
 			NotificationEvents: notificationEvents,
-			ConversationEvents: stateEvents.activity,
 			AckNotification:    func(id string, after int) error { return client.AckNotification(ctx, "tui/"+conversation, id, after) },
 			InitialConnections: shared.Connections,
 			RuntimeEvents:      stateEvents.runtime,
 			InitialRuntime:     shared.Runtime,
-			DurableWorkEvents:  stateEvents.durableWork,
-			InitialDurableWork: shared.DurableWork,
 			UpdateCheck:        updateCheck,
 			UpdateAvailable:    updateAvailable,
 			UpdateCheckedAt:    updateCheckedAt,
@@ -861,33 +754,6 @@ func interactiveTerminal() bool {
 	input, inputErr := os.Stdin.Stat()
 	output, outputErr := os.Stdout.Stat()
 	return inputErr == nil && outputErr == nil && input.Mode()&os.ModeCharDevice != 0 && output.Mode()&os.ModeCharDevice != 0
-}
-
-func runOnce(configPath, version string) error {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	if client, active, clientErr := activeWorkspaceClient(ctx, cfg); clientErr != nil {
-		return clientErr
-	} else if active {
-		return client.RunOnce(ctx)
-	}
-	service, err := buildService(cfg, version)
-	if err != nil {
-		return err
-	}
-	defer service.Close()
-	if err := service.Start(ctx); err != nil {
-		service.Runtime.LogEvent("error", "startup", "service_start_failed", "Service startup failed")
-		return err
-	}
-	if err := service.Orchestrator.ScanOnce(ctx); err != nil {
-		return err
-	}
-	return service.Orchestrator.WaitForIdle(ctx)
 }
 
 func runMessageMode(configPath, conversation, text, version string, options messageRunOptions) error {
@@ -1366,12 +1232,12 @@ func enabled(value bool) string {
 	return "disabled"
 }
 
-const helpText = `Spynel - non-AI orchestration for one human and many coding agents
+const helpText = `Spynel - a classic, non-AI program coordinating external coding harnesses
 
 Usage:
   spynel                         Launch TUI and enabled background services
   spynel serve [--tui] [--socket PATH]
-                                Run channels and orchestration; mirror safe lifecycle logs when headless
+                                Run channels and background services; mirror safe lifecycle logs when headless
   spynel init [--dir DIR]        Initialize and continue into the TUI
     --no-start                   Initialize only (for scripts and automation)
   spynel send [flags] TEXT       Send or stream a message
@@ -1394,30 +1260,16 @@ Usage:
   spynel status [flags]          Show workspace and current conversation status
   spynel command [flags] NAME    Run any non-visual framework slash command
   spynel model|effort|speed ... Inspect or select model inference properties
-  spynel tasks [flags] [VIEW]   List durable tasks (open by default)
-  spynel goals [flags] [VIEW]   List durable goals (open by default)
-    VIEW                        open|recent|active|review|waiting|done|failed|all
-    --config PATH               Load an explicit workspace configuration
-    --conversation NAME         Use a durable CLI command conversation
-    --days N                    Restrict updated_at to the last N days
-    --limit N                   Render 1 through 100 matching items
-    --detail                    Add allowlisted durable details
-    --json                      Emit the shared response event as NDJSON
-  spynel job message N TEXT     Guide a live orchestrator job in place
-  spynel job ping N             Request durable progress from a live job
+  spynel job info N             Show bounded live or archived job metadata
+  spynel job output N [tail]    Show bounded captured job output
+  spynel job kill N             Stop a running agent job by number
   spynel docs [TOPIC]            Read curated offline documentation
     search QUERY [page NUMBER]   Search bounded topic sections
     --format text|json           Select plain Markdown or versioned JSON
-  spynel instructions            Validate role instruction files without showing contents
   spynel jobs|log...             Other concise framework-command aliases
   spynel update                 Update and restart every instance of this installation
   spynel update check           Check versions without updating or restarting
   spynel killall                Stop all running Spynel instances
-  spynel run --once              Dispatch one orchestration scan and wait
-  spynel task [--no-review] REQUEST
-                                Create a task (reviewed by default)
-  spynel task inspect FILE      Show the task's effective review policy
-  spynel goal OBJECTIVE          Create a goal markdown file
   spynel extension ...           List, install, or remove Git extensions
   spynel whatsapp pair           Pair a WhatsApp account by QR code
   spynel config [get|set|unset ...]

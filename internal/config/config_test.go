@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -54,88 +55,14 @@ func TestDefaultIsValid(t *testing.T) {
 	if cfg.Harness.Sandbox != "danger-full-access" {
 		t.Fatalf("default coding harness should be unrestricted, got %q", cfg.Harness.Sandbox)
 	}
-	if cfg.Harness.ChatAgentPrefix != "" || cfg.Harness.DeveloperAgentPrefix != "" || cfg.Harness.ReviewerAgentPrefix != "" || cfg.Harness.HeartbeatAgentPrefix != "" || cfg.Harness.Reviews != TaskReviewsSkipTrivial {
-		t.Fatalf("unexpected harness agent defaults: %#v", cfg.Harness)
-	}
 	if !cfg.Speech.Enabled || cfg.Speech.Language != "en" || cfg.Speech.NumThreads != 2 {
 		t.Fatalf("unexpected speech defaults: %#v", cfg.Speech)
 	}
 	if cfg.Channels.TUI.Theme != "spynel" {
 		t.Fatalf("unexpected default TUI theme: %#v", cfg.Channels.TUI)
 	}
-	if cfg.Orchestrator.SemanticHeartbeatMinutes != 15 {
-		t.Fatalf("semantic heartbeat default = %d, want 15", cfg.Orchestrator.SemanticHeartbeatMinutes)
-	}
-	if !cfg.Orchestrator.RetriggerUnrespondedMessages {
-		t.Fatal("conversation recovery should default on")
-	}
 	if cfg.Workspace.CleanupRetentionDays != 30 {
 		t.Fatalf("cleanup retention default = %d, want 30", cfg.Workspace.CleanupRetentionDays)
-	}
-}
-
-func TestHarnessAgentPrefixesAndReviewModeValidation(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		prefix string
-		prompt string
-		want   string
-	}{
-		{name: "command", prefix: "/goal", prompt: "Do the work", want: "/goal Do the work"},
-		{name: "outer whitespace", prefix: "  /goal   ", prompt: "Do the work", want: "/goal Do the work"},
-		{name: "multi-token", prefix: "  /goal keep   this  ", prompt: "Do the work", want: "/goal keep   this Do the work"},
-		{name: "empty prefix", prefix: "", prompt: "prompt", want: "prompt"},
-		{name: "whitespace-only prefix", prefix: " \t ", prompt: "prompt", want: "prompt"},
-		{name: "empty prompt", prefix: " /goal ", prompt: "", want: "/goal "},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := PrependAgentPrefix(test.prefix, test.prompt); got != test.want {
-				t.Fatalf("PrependAgentPrefix(%q, %q) = %q, want %q", test.prefix, test.prompt, got, test.want)
-			}
-		})
-	}
-	for _, mode := range []string{TaskReviewsSkipTrivial, TaskReviewsAlways, TaskReviewsNever} {
-		cfg := Default()
-		cfg.Harness.Reviews = mode
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("review mode %q: %v", mode, err)
-		}
-	}
-	cfg := Default()
-	cfg.Harness.Reviews = "sometimes"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "harness.reviews") {
-		t.Fatalf("invalid review mode validation = %v", err)
-	}
-	cfg = Default()
-	cfg.Harness.DeveloperAgentPrefix = "/goal\nunsafe"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "developer_agent_prefix") {
-		t.Fatalf("multiline prefix validation = %v", err)
-	}
-}
-
-func TestMinimalConfigUsesEmptyHarnessAgentPrefixDefaults(t *testing.T) {
-	root := t.TempDir()
-	path := writeTestConfig(t, root, []byte("version: 1\n"))
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Harness.ChatAgentPrefix != "" || cfg.Harness.DeveloperAgentPrefix != "" || cfg.Harness.ReviewerAgentPrefix != "" || cfg.Harness.HeartbeatAgentPrefix != "" || cfg.Harness.Reviews != TaskReviewsSkipTrivial {
-		t.Fatalf("default harness settings were not retained: %#v", cfg.Harness)
-	}
-}
-
-func TestSemanticHeartbeatValidationSupportsExplicitDisable(t *testing.T) {
-	cfg := Default()
-	cfg.Orchestrator.SemanticHeartbeatMinutes = 0
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("disabled semantic heartbeat was rejected: %v", err)
-	}
-	for _, invalid := range []int{-1, 1, 4, 1441} {
-		cfg.Orchestrator.SemanticHeartbeatMinutes = invalid
-		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "semantic_heartbeat_minutes") {
-			t.Fatalf("invalid semantic heartbeat %d produced %v", invalid, err)
-		}
 	}
 }
 
@@ -346,11 +273,136 @@ func TestLoadIgnoresUnusedKeysAndSaveRemovesThem(t *testing.T) {
 	if err != nil || reloaded.Channels.TUI.Title != "Preserved" {
 		t.Fatalf("saved settings: %#v, %v", reloaded, err)
 	}
-	for _, invalid := range []string{"speech: {enabled: invalid}", "orchestrator: {max_parallel: 0}", "version: 1\nversion: 2"} {
+	for _, invalid := range []string{"speech: {enabled: invalid}", "version: 1\nversion: 2"} {
 		if _, err := decode([]byte(invalid), path); err == nil {
 			t.Fatalf("invalid current setting accepted: %s", invalid)
 		}
 	}
+}
+
+func TestRetiredWorkflowKeysAreIgnoredOnLoadAndOmittedOnSave(t *testing.T) {
+	legacy := []byte("version: 1\n" +
+		"orchestrator:\n" +
+		"  enabled: true\n" +
+		"  interval_seconds: 5\n" +
+		"  retrigger_unresponded_messages: false\n" +
+		"  semantic_heartbeat_minutes: 15\n" +
+		"  task_notifications: always\n" +
+		"  max_parallel: 8\n" +
+		"harness:\n" +
+		"  name: codex\n" +
+		"  reviews: never\n" +
+		"  chat_agent_prefix: /ultrathink\n" +
+		"  developer_agent_prefix: /dev\n" +
+		"  reviewer_agent_prefix: /review\n" +
+		"  heartbeat_agent_prefix: /audit\n" +
+		"workspace:\n" +
+		"  history_max_messages: 25\n" +
+		"channels:\n" +
+		"  telegram:\n" +
+		"    token: 123:legacy-token\n" +
+		"    allowed_users: [\"123456789\"]\n" +
+		"speech:\n" +
+		"  elevenlabs_api_key: legacy-stored-key\n")
+	current := []byte("version: 1\n" +
+		"harness:\n" +
+		"  name: codex\n" +
+		"workspace:\n" +
+		"  history_max_messages: 25\n" +
+		"channels:\n" +
+		"  telegram:\n" +
+		"    token: 123:legacy-token\n" +
+		"    allowed_users: [\"123456789\"]\n" +
+		"speech:\n" +
+		"  elevenlabs_api_key: legacy-stored-key\n")
+	root := t.TempDir()
+	path := writeTestConfig(t, root, legacy)
+
+	legacyCfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(onDisk) != string(legacy) {
+		t.Fatal("load rewrote a legacy configuration containing retired keys")
+	}
+
+	// The retired keys must not influence the decoded configuration at all:
+	// removing them from the same file yields an identical config.
+	canonicalCfg, err := Load(writeTestConfig(t, root, current))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(legacyCfg, canonicalCfg) {
+		t.Fatalf("retired keys changed the decoded configuration:\nlegacy %#v\ncurrent %#v", legacyCfg, canonicalCfg)
+	}
+	if legacyCfg.Channels.Telegram.Token != "123:legacy-token" || len(legacyCfg.Channels.Telegram.AllowedUsers) != 1 {
+		t.Fatalf("channel settings were not preserved: %#v", legacyCfg.Channels.Telegram)
+	}
+	if legacyCfg.Speech.ElevenLabsAPIKey != "legacy-stored-key" {
+		t.Fatalf("stored secret was not preserved: %q", legacyCfg.Speech.ElevenLabsAPIKey)
+	}
+	if legacyCfg.Workspace.HistoryMaxMessages != 25 || legacyCfg.Harness.Name != "codex" {
+		t.Fatalf("retained settings were not preserved: %#v", legacyCfg)
+	}
+
+	// An explicit canonical save drops every retired key while keeping the
+	// current settings and secrets.
+	path = writeTestConfig(t, root, legacy)
+	legacyCfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(legacyCfg); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, retired := range []string{
+		"orchestrator:", "retrigger_unresponded_messages", "semantic_heartbeat_minutes",
+		"task_notifications", "max_parallel", "reviews:", "chat_agent_prefix:", "developer_agent_prefix:",
+		"reviewer_agent_prefix:", "heartbeat_agent_prefix:", "/ultrathink", "/dev", "/review", "/audit", "never",
+	} {
+		if strings.Contains(string(saved), retired) {
+			t.Fatalf("retired key or value %q survived the canonical save:\n%s", retired, saved)
+		}
+	}
+	for _, preserved := range []string{
+		"name: codex", "history_max_messages: 25", "token: 123:legacy-token", "allowed_users:", "elevenlabs_api_key: legacy-stored-key",
+	} {
+		if !strings.Contains(string(saved), preserved) {
+			t.Fatalf("canonical save lost %q:\n%s", preserved, saved)
+		}
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// yaml marshals a nil allow-list as [] and decodes [] as an empty slice,
+	// so the canonical round trip is compared with normalized empties.
+	if !reflect.DeepEqual(normalizeEmptyConfigSlices(reloaded), normalizeEmptyConfigSlices(legacyCfg)) {
+		t.Fatalf("reloading the saved configuration changed it:\nreloaded %#v\nbefore %#v", reloaded, legacyCfg)
+	}
+}
+
+// normalizeEmptyConfigSlices collapses empty allow-list and argument slices
+// to nil so canonical save/load round trips compare by content.
+func normalizeEmptyConfigSlices(cfg Config) Config {
+	if len(cfg.Channels.Telegram.AllowedUsers) == 0 {
+		cfg.Channels.Telegram.AllowedUsers = nil
+	}
+	if len(cfg.Channels.WhatsApp.AllowedNumbers) == 0 {
+		cfg.Channels.WhatsApp.AllowedNumbers = nil
+	}
+	if len(cfg.Harness.ACPArgs) == 0 {
+		cfg.Harness.ACPArgs = nil
+	}
+	return cfg
 }
 
 func TestHarnessSandboxValidationAcceptsCanonicalModes(t *testing.T) {

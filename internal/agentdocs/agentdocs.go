@@ -100,7 +100,7 @@ func HelpTopics() []Topic {
 // DocumentedSlashCommands returns the base slash commands named by the static
 // command topic. The app package verifies these against its canonical catalog.
 func DocumentedSlashCommands() []string {
-	return []string{"/help", "/status", "/config", "/harness", "/model", "/effort", "/speed", "/telegram", "/whatsapp", "/stop", "/restart", "/update", "/history", "/log", "/jobs", "/job", "/tasks", "/goals", "/clear", "/task", "/goal", "/trigger", "/cleanup", "/extension", "/pi"}
+	return []string{"/help", "/status", "/primary", "/welcome", "/config", "/harness", "/model", "/effort", "/speed", "/theme", "/telegram", "/whatsapp", "/title", "/new", "/stop", "/pi", "/restart", "/update", "/history", "/resume", "/log", "/jobs", "/job", "/clear", "/cleanup", "/extension", "/quit"}
 }
 
 func Render(request Request) (string, error) {
@@ -438,7 +438,7 @@ func topicByID(id string) (Topic, bool) {
 
 func canonicalTopic(id string) string {
 	id = strings.ToLower(strings.TrimSpace(id))
-	aliases := map[string]string{"config": "configuration", "workflow": "tasks", "instances": "instances-primary", "primary": "instances-primary", "state": "workspace-state"}
+	aliases := map[string]string{"config": "configuration", "instances": "instances-primary", "primary": "instances-primary", "state": "workspace-state"}
 	if replacement := aliases[id]; replacement != "" {
 		return replacement
 	}
