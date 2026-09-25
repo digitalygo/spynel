@@ -1,6 +1,7 @@
 ---
 status: completed
 created_at: 2026-09-25
+updated_at: 2026-09-25
 files_edited:
   - AGENTS.md
   - README.md
@@ -167,7 +168,7 @@ files_edited:
   - internal/harness/pi_telegram_note_identity_windows_test.go
   - internal/harness/pi_telegram_note_smoke_test.go
   - internal/harness/pi_telegram_note_test.go
-rationale: Retire the workspace workflow and orchestrator layer, route ordinary Pi chat directly to the provider with the raw accepted user message and deterministic framework commands, keep the bounded-history fallback for every other harness, and add one additive Telegram-only Pi system-prompt note through a trust-validated private runtime extension.
+rationale: Retire the workspace workflow and orchestrator layer, route ordinary Pi chat directly to the provider with the raw accepted user message and deterministic framework commands, keep the bounded-history fallback for every other harness, and add one additive Telegram-only Pi system-prompt note through a trust-validated private runtime extension. The follow-up work published that rework as the breaking v2.0.0 release through the documented two-stage release process and deployed it to the local npm-managed home service.
 supporting_docs:
   - ../../../docs/agent-docs.md
   - ../../../docs/architecture.md
@@ -178,6 +179,7 @@ supporting_docs:
   - ../../../docs/integrations.md
   - ../../../docs/programmatic-integration.md
   - ../../../docs/provider-canary-threat-model.md
+  - ../../../docs/releasing.md
   - ../research/2026-09-19-spynel-architecture-security-quality-gates.md
   - 2026-09-19-digitalygo-repository-migration.md
   - 2026-09-19-local-pi-configuration.md
@@ -190,6 +192,9 @@ supporting_docs:
   - 2026-09-22-pi-rate-limit-answer-recovery.md
   - 2026-09-23-telegram-command-menu-and-stale-thresholds.md
   - 2026-09-23-transcript-echo.md
+  - https://github.com/digitalygo/spynel/releases/tag/v2.0.0
+  - https://github.com/digitalygo/spynel/actions/runs/36162044479
+  - https://github.com/digitalygo/spynel/actions/runs/36163619933
 ---
 
 # Pi-direct chat rework and workflow retirement
@@ -285,3 +290,42 @@ No commit, push, release, or deployment was requested. The rework is uncommitted
 - [Plain CLI and automation](../../../docs/cli.md)
 - [Programmatic integration](../../../docs/programmatic-integration.md)
 - [Provider canary threat model](../../../docs/provider-canary-threat-model.md)
+
+## Update 2026-09-25: v2.0.0 publication and local deployment
+
+### Summary of changes
+
+The [Release and publication status](#release-and-publication-status) section above is the pre-publication snapshot and is superseded by this update. The Pi-direct rework was committed as the breaking change `b00efca0600e60b7192fb15e228f827b6496cbcc` (`feat(app)!: make Pi chat direct`), pushed to `main`, and published as [Spynel v2.0.0](https://github.com/digitalygo/spynel/releases/tag/v2.0.0), whose annotated tag object `17683c1f9bc27ae2045c0db6d04edb12a40304b8` peels that commit. The local npm-managed home service was upgraded exactly once from 1.6.0 to 2.0.0 through the official `spynel update` path.
+
+### Technical reasoning
+
+The rework removes two packages and changes provider-visible chat semantics, so it was published as the major release `v2.0.0` rather than a patch. Publication followed the documented two-stage process in [Releasing](../../../docs/releasing.md): a [manual validation run](https://github.com/digitalygo/spynel/actions/runs/36162044479) against the pinned commit with publication skipped, then the annotated tag and the [publishing release run](https://github.com/digitalygo/spynel/actions/runs/36163619933). A unique temporary validation branch pinned the commit, and it was removed after both runs succeeded.
+
+The embedded Telegram Pi note materializes lazily into the private workspace runtime on the first conversation, so no live model call or paid prompt was made during validation, and this update claims no live model compliance. The real Pi fake-provider smoke covers the additive note composition for global and trusted-project `APPEND_SYSTEM.md` discovery instead.
+
+Local deployment used the official coordinated updater exactly once instead of a direct npm replacement. The restarted service kept the same service PID `2090417` but registered a new process generation, which verifies an in-place owner replacement rather than the stale pre-update process reporting a new version.
+
+### Impact assessment
+
+- The public stable `latest` npm package and GitHub Release are now 2.0.0. The Release has five assets: four native archives for Linux and macOS on amd64 and arm64 plus `checksums.txt`. The npm `latest` tag is `@digitalygo/spynel@2.0.0` with SLSA provenance v1.
+- The live home-workspace server runs 2.0.0 with the same service PID `2090417` and a new registered generation from `dea13a0e...` to `7646cfd03f85d9b810c8c4ccbecfde0a`, `ready=true`, Telegram and Pi connected, zero jobs, and current and latest both reported as 2.0.0.
+- The Telegram Bot API reports the exact ordered 22 command names and descriptions from `internal/app/command_menu.go` in the `all_private_chats` scope. No manual `setMyCommands` call was made, and the new runtime log contains no menu registration failure. This proves provider registration.
+- User state was preserved: the private `.spynel` workspace and runtime directories remain mode `0700`, the configuration file remains mode `0600` with unchanged presence and digest, the legacy task, goal, prompt, and instruction metadata digests are unchanged, and no leases exist.
+- The Linuxbrew npmrc returned to mode `0444` with its original SHA-256 `a0e43e...` unchanged after the trapped temporary owner-write.
+- The embedded Telegram Pi note still has no live compliance evidence: it materializes on the first conversation, and no live model call or paid prompt was made. The real Pi fake-provider run covers composition only.
+- The unrelated untracked `.ai-telemetry/` directory was not staged, modified, or packaged, and its contents were not inspected. Repository-wide DOX and smoke gates were run in clean worktrees because that directory produces false findings in the development tree.
+- Security note: during a delegated preflight one ephemeral old primary lease token was printed to the private agent transcript. The restart rotated the ownership term and its token per `internal/instance/election.go:158-165`. No Telegram or ElevenLabs secret was printed, and the token value is not recorded here.
+
+### Validation steps
+
+- Clean exact-commit local gates passed in a clean detached worktree: `scripts/dev.sh dox` reported DOX coverage valid for 49 tracked directories, and `scripts/dev.sh test`, `go test -p1 -count1 ./...`, `go vet ./...`, a Go build of `./cmd/spynel`, `scripts/smoke.sh`, and `node npm/test.js` completed without failures.
+- Host packaging produced `spynel_2.0.0_linux_amd64.tar.gz` with SHA-256 `bb3c5eed777a720c1687abe6051be7ddaadb25abe0df8e1f2d11a11be6b749e0`, and the extracted binary reported 2.0.0 with the native libraries and licenses present.
+- Tracked-source release preparation: `npm/prepare-release.js v2.0.0 false` followed by `npm pack --dry-run` verified the v2.0.0 metadata, tag-pinned README links, a nine-file package, and no telemetry artifacts.
+- The real Pi fake-provider smoke passed for global and trusted-project `APPEND_SYSTEM.md`, covering the additive note composition, with no live model call or paid prompt.
+- Manual workflow run [36162044479](https://github.com/digitalygo/spynel/actions/runs/36162044479) on the pinned commit passed verify and all four native builds with publish skipped. Its four downloaded native evidence records were independently checked as `observed-native` at source `b00efca0600e60b7192fb15e228f827b6496cbcc` with six passing checks each.
+- Published release run [36163619933](https://github.com/digitalygo/spynel/actions/runs/36163619933) on the tag passed verify, all four native builds, and mandatory publish. The annotated tag object `17683c1f9bc27ae2045c0db6d04edb12a40304b8` peels `b00efca0600e60b7192fb15e228f827b6496cbcc`, and the Release lists five assets.
+- The public host Linux amd64 archive matched `checksums.txt`, SHA-256 `02d1ef2d29568039bf4d40a5f1b0c9667fe4f8e807a992951caf7ca7fc5e344f`, and the extracted binary reported 2.0.0. An isolated exact `@digitalygo/spynel@2.0.0` npm install passed.
+- Local deployment: exactly one official `spynel update` upgraded the npm-managed home service from 1.6.0 to 2.0.0. Afterwards the installed CLI and registered live process reported 2.0.0 with the same PID `2090417`, new generation `7646cfd03f85d9b810c8c4ccbecfde0a`, `ready=true`, Telegram and Pi connected, zero jobs, and current and latest both reported as 2.0.0.
+- Workspace state checks: private `.spynel` and runtime directories mode `0700`, configuration mode `0600` with unchanged digest and presence, legacy task, goal, prompt, and instruction metadata digests unchanged, and no leases. The Linuxbrew npmrc was temporarily made owner-writable and restored through a shell trap to mode `0444` with its original SHA-256 `a0e43e...`.
+- A credential-safe read-only `getMyCommands` request for `all_private_chats` matched the committed catalog exactly, 22 ordered command names and descriptions. No manual `setMyCommands` call was made, and the new runtime log has no menu registration failure.
+- This record carries `updated_at: 2026-09-25`, `docs/releasing.md`, the release URL, and both run URLs in `supporting_docs`. The original narrative, `created_at`, and the 165-path `files_edited` list are unchanged.
