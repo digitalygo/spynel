@@ -924,8 +924,33 @@ func waitClosed(t *testing.T, done <-chan struct{}, description string) {
 	}
 }
 
+// webhookTeardownTimeout bounds the wait for runWebhook teardown. Production
+// allows five seconds for server.Shutdown plus the teardown deleteWebhook
+// call, so the test waits slightly longer before reporting a hang.
+const webhookTeardownTimeout = 6 * time.Second
+
+// waitWebhookDelete waits for the deleteWebhook stub to observe the teardown
+// request. It fails the test when teardown never reaches the provider instead
+// of silently passing on a fixed sleep.
+func waitWebhookDelete(t *testing.T, deleted <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-deleted:
+	case <-time.After(webhookTeardownTimeout):
+		t.Fatalf("%s teardown did not call deleteWebhook", description)
+	}
+}
+
+// webhookTestClient opens a fresh connection per request so no pooled
+// HTTP/1.1 connection can stall runWebhook teardown until its read-header
+// deadline and skip the provider deleteWebhook call.
+func webhookTestClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+}
+
 func TestWebhookModeVerifiesSecretAndRoutesUpdate(t *testing.T) {
 	var webhookURL string
+	deleted := make(chan struct{}, 1)
 	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
@@ -937,6 +962,10 @@ func TestWebhookModeVerifiesSecretAndRoutesUpdate(t *testing.T) {
 			webhookURL, _ = payload["url"].(string)
 			_, _ = writer.Write([]byte(`{"ok":true,"result":true}`))
 		case "/bottest/deleteWebhook":
+			select {
+			case deleted <- struct{}{}:
+			default:
+			}
 			_, _ = writer.Write([]byte(`{"ok":true,"result":true}`))
 		default:
 			http.NotFound(writer, request)
@@ -980,10 +1009,11 @@ func TestWebhookModeVerifiesSecretAndRoutesUpdate(t *testing.T) {
 		t.Fatalf("webhook status exposed its private public URL: %q", detail)
 	}
 	localURL := "http://" + detail[index+len(marker):] + parsed.Path
+	client := webhookTestClient()
 	post := func(secret string) int {
 		request, _ := http.NewRequest(http.MethodPost, localURL, strings.NewReader(`{"update_id":1,"message":{"message_id":2,"from":{"id":7,"username":"trusted"},"chat":{"id":42,"type":"private"},"date":1,"text":"hello"}}`))
 		request.Header.Set("X-Telegram-Bot-Api-Secret-Token", secret)
-		response, err := http.DefaultClient.Do(request)
+		response, err := client.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1005,10 +1035,14 @@ func TestWebhookModeVerifiesSecretAndRoutesUpdate(t *testing.T) {
 		t.Fatal("webhook update was not routed")
 	}
 	cancel()
+	waitWebhookDelete(t, deleted, "webhook")
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(webhookTeardownTimeout):
 		t.Fatal("webhook bot did not stop")
+	}
+	if _, err := client.Get(localURL); err == nil {
+		t.Fatal("webhook listener still accepts connections after Run returned")
 	}
 }
 
@@ -1016,6 +1050,7 @@ func TestWebhookAuthorizationLossStopsListenerAndDeletesWebhook(t *testing.T) {
 	allowed := []string{"7"}
 	var webhookURL string
 	var deletes atomic.Int32
+	deleted := make(chan struct{}, 1)
 	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
@@ -1028,6 +1063,10 @@ func TestWebhookAuthorizationLossStopsListenerAndDeletesWebhook(t *testing.T) {
 			_, _ = writer.Write([]byte(`{"ok":true,"result":true}`))
 		case "/bottest/deleteWebhook":
 			deletes.Add(1)
+			select {
+			case deleted <- struct{}{}:
+			default:
+			}
 			_, _ = writer.Write([]byte(`{"ok":true,"result":true}`))
 		default:
 			http.NotFound(writer, request)
@@ -1063,9 +1102,10 @@ func TestWebhookAuthorizationLossStopsListenerAndDeletesWebhook(t *testing.T) {
 		t.Fatal("timed out waiting for webhook listener")
 	}
 	allowed = nil
+	client := webhookTestClient()
 	request, _ := http.NewRequest(http.MethodPost, localURL, strings.NewReader(`{"update_id":1,"message":{"message_id":2,"from":{"id":7},"chat":{"id":7,"type":"private"},"text":"blocked"}}`))
 	request.Header.Set("X-Telegram-Bot-Api-Secret-Token", "secret")
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1073,18 +1113,19 @@ func TestWebhookAuthorizationLossStopsListenerAndDeletesWebhook(t *testing.T) {
 	if response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("revoked webhook status = %d", response.StatusCode)
 	}
+	waitWebhookDelete(t, deleted, "revoked webhook")
 	select {
 	case err := <-done:
 		if !errors.Is(err, errTelegramRuntimeAuthorization) {
 			t.Fatalf("webhook Run() error = %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(webhookTeardownTimeout):
 		t.Fatal("revoked webhook listener did not stop")
 	}
 	if deletes.Load() != 1 {
 		t.Fatalf("revoked webhook cleanup calls = %d, want 1", deletes.Load())
 	}
-	if _, err := http.DefaultClient.Get(localURL); err == nil {
+	if _, err := client.Get(localURL); err == nil {
 		t.Fatal("revoked webhook listener still accepts connections")
 	}
 }
