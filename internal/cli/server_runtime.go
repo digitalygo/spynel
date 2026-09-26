@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/digitalygo/spynel/internal/app"
 	"github.com/digitalygo/spynel/internal/channel"
+	"github.com/digitalygo/spynel/internal/channel/telegram"
 	"github.com/digitalygo/spynel/internal/config"
 	"github.com/digitalygo/spynel/internal/core"
 	"github.com/digitalygo/spynel/internal/instance"
@@ -35,6 +37,7 @@ type primaryTerm struct {
 	apiDone         chan struct{}
 	apiError        chan error
 	channelsDone    <-chan error
+	replyQueueDone  chan struct{}
 	maintenanceDone chan error
 	stopOnce        sync.Once
 }
@@ -189,10 +192,30 @@ func startPrimaryTerm(parent context.Context, original config.Config, version st
 		apiDone: make(chan struct{}), apiError: make(chan error, 1), maintenanceDone: make(chan error, 1),
 	}
 	reportConnection := func(status channel.ConnectionStatus) { service.SetConnectionStatus(status) }
-	term.channelsDone, err = startChannels(ctx, service, reportConnection)
+	// The durable final-reply worker belongs to the primary term, not to one
+	// Telegram adapter generation: it runs for the whole owner lifetime even
+	// while Telegram is disabled or disconnected, so expiry cleanup proceeds,
+	// and it is joined before the primary lease is released. Every short
+	// record mutation is fenced by this exact ownership term; provider
+	// requests run outside the election lock.
+	replyLog := service.Runtime.Writer("telegram.replies")
+	replyWorker := telegram.NewReplyWorker(
+		cfg.StatePath("runtime", "telegram-replies"),
+		election.ID(),
+		func(action func() error) (bool, error) { return election.RunWhileOwner(token, action) },
+		func(line string) { _, _ = fmt.Fprintln(replyLog, line) },
+	)
+	term.replyQueueDone = make(chan struct{})
+	go func() {
+		defer service.Runtime.RecoverPanic("telegram.replies", "worker_panic")
+		defer close(term.replyQueueDone)
+		replyWorker.Run(ctx)
+	}()
+	term.channelsDone, err = startChannels(ctx, service, reportConnection, replyWorker)
 	if err != nil {
-		_ = service.Close()
 		cancel()
+		<-term.replyQueueDone
+		_ = service.Close()
 		return nil, err
 	}
 	apiServer := &localapi.Server{Service: service, Token: token}
@@ -262,6 +285,7 @@ func (term *primaryTerm) stopFor(targetID string) error {
 		_ = term.service.Harness.Close()
 		<-term.apiDone
 		<-term.channelsDone
+		<-term.replyQueueDone
 		<-term.maintenanceDone
 		if targetID != "" {
 			_, handedOff, err := term.election.Handoff(term.token, targetID)

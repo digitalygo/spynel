@@ -54,6 +54,10 @@ type Bot struct {
 	listen            func(string, string) (net.Listener, error)
 	renamedTopicsMu   sync.Mutex
 	renamedTopics     map[string]struct{}
+	// replies is the durable final-reply queue. It stays nil for direct
+	// constructions that never opted into durable delivery (unit tests), in
+	// which case terminal replies keep the existing bounded direct send.
+	replies *replyQueue
 	// retryWait sleeps out a provider-requested or transport retry delay.
 	// Tests replace it to observe waits without real sleeping.
 	retryWait func(context.Context, time.Duration) error
@@ -124,6 +128,120 @@ func (b *Bot) SetTranscriptEcho(enabled bool) { b.transcriptEcho = enabled }
 // SetAllowedUsersSource installs the live configuration resolver used at
 // startup and immediately before every inbound and outbound provider action.
 func (b *Bot) SetAllowedUsersSource(source func() []string) { b.allowedUsers = source }
+
+// AttachReplyWorker connects the bot to the primary-term-owned durable
+// final-reply worker (.spynel/runtime/telegram-replies in production).
+// Inbound terminal replies and direct handler failures are persisted before
+// delivery, retried on the queue's exponential schedule, and removed after
+// every chunk is confirmed or after the one-hour expiry. Attachments,
+// welcome messages, transcript echoes, and proactive deliveries keep their
+// existing one-shot semantics. The bot registers itself with the worker only
+// after a successful getMe, and records are bound to that verified account.
+// Without this call terminal replies keep the ordinary bounded direct send.
+func (b *Bot) AttachReplyWorker(worker *ReplyWorker) {
+	if worker == nil {
+		b.replies = nil
+		return
+	}
+	b.replies = worker.queue
+}
+
+// accountID reports the verified bot account or zero before getMe.
+func (b *Bot) accountID() int64 { return b.me.ID }
+
+// logReplyQueue records one content-free queue diagnostic for a refusal that
+// happened before the queue could own the record.
+func (b *Bot) logReplyQueue(event string, fields ...string) {
+	if b.log == nil {
+		return
+	}
+	_, _ = fmt.Fprintln(b.log, replyQueueLogLine(event, fields...))
+}
+
+// deliverFinal queues one terminal reply or handler failure for durable
+// delivery through the primary-owned worker. A configured queue never falls
+// back to a direct provider send: capacity, storage, or ownership refusals
+// are reported and produce no provider traffic at all. A bot that has not
+// completed getMe is refused for the same reason. text is already the exact
+// selected and decorated final text, including the downstream Pi session
+// notice when the application added one.
+func (b *Bot) deliverFinal(ctx context.Context, route Route, text string, replyTo int64, sender telegramUser) error {
+	if b.replies == nil {
+		return b.send(ctx, route, text, replyTo)
+	}
+	if b.me.ID <= 0 {
+		b.logReplyQueue("suppressed", "reason=unverified")
+		return errReplyQueueGenerationLost
+	}
+	chunks := markdownfmt.TelegramChunks(text)
+	if len(chunks) == 0 {
+		return nil
+	}
+	plain := make([]string, len(chunks))
+	for index, chunk := range chunks {
+		plain[index] = markdownfmt.TelegramChunkPlainText(chunk)
+	}
+	err := b.replies.enqueue(replyRecord{
+		BotID:          b.me.ID,
+		Conversation:   route.Conversation(),
+		SenderID:       sender.ID,
+		SenderUsername: normalizeUsername(sender.Username),
+		ReplyTo:        replyTo,
+		HTML:           chunks,
+		Plain:          plain,
+	})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errReplyQueueFull):
+		b.logReplyQueue("suppressed", "reason=capacity")
+	case errors.Is(err, errReplyQueueStorage):
+		b.logReplyQueue("storage error", "reason=enqueue")
+	case errors.Is(err, errReplyQueueOwnership):
+		b.logReplyQueue("suppressed", "reason=generation")
+	default:
+		b.logReplyQueue("suppressed", "reason=invalid")
+	}
+	return err
+}
+
+// sendQueuedChunk performs exactly one provider request for one stored
+// chunk. It deliberately bypasses the nested transport retry budget used by
+// ordinary sends so the queue's initial send plus five scheduled rounds is
+// the complete retry allowance; the ordinary short retry stays exclusive to
+// non-queued sends.
+func (b *Bot) sendQueuedChunk(ctx context.Context, route Route, text string, replyTo int64, html bool) error {
+	if err := b.authorizeProviderRoute(route); err != nil {
+		return err
+	}
+	_, err := b.callProviderOnce(ctx, "sendMessage", sendMessagePayload(route, text, replyTo, html))
+	return err
+}
+
+// authorizeQueuedRecord reapplies the live allow-list, the current route
+// policy, and the original group sender's authorization immediately before
+// every queued chunk and HTML fallback. A lost bot generation is reported as
+// a suspendable generation failure; a revoked recipient or group sender is
+// reported as a permanent suppression. Neither spends a retry round.
+func (b *Bot) authorizeQueuedRecord(record replyRecord) error {
+	if b.me.ID <= 0 || record.BotID != b.me.ID {
+		return errReplyQueueGenerationLost
+	}
+	if err := b.requireRuntimeAuthorization(); err != nil {
+		return fmt.Errorf("%w: %v", errReplyQueueGenerationLost, err)
+	}
+	route, err := ParseConversation(record.Conversation)
+	if err != nil {
+		return fmt.Errorf("%w: invalid route", errReplyQueueRecipientRevoked)
+	}
+	if route.IsGroup() && !b.allowed(telegramUser{ID: record.SenderID, Username: record.SenderUsername}) {
+		return errReplyQueueRecipientRevoked
+	}
+	if err := b.authorizeRoutePolicy(route); err != nil {
+		return fmt.Errorf("%w: %v", errReplyQueueRecipientRevoked, err)
+	}
+	return nil
+}
 
 func (b *Bot) liveAllowedUsers() []string {
 	if b.allowedUsers == nil {
@@ -301,6 +419,18 @@ func (b *Bot) Run(ctx context.Context, handler channel.Handler) error {
 		return err
 	}
 	_ = json.Unmarshal(result, &b.me)
+	if b.me.ID <= 0 {
+		err := errors.New("Telegram getMe returned no verified bot identity")
+		b.reportStatus(channel.ConnectionError, err.Error())
+		return err
+	}
+	// Only a getMe-verified generation registers with the primary-owned
+	// worker, and only for its own Run lifetime. Queued records are bound to
+	// this verified account and are never delivered through another bot.
+	if b.replies != nil {
+		b.replies.attachBot(b)
+		defer b.replies.detachBot(b)
+	}
 	if err := b.registerCommands(ctx); err != nil {
 		return err
 	}
@@ -545,7 +675,7 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 	}
 	text, echoes, err := b.prepareMessage(ctx, message)
 	if err != nil {
-		if sendErr := b.send(ctx, route, channel.ErrorResponse("Spynel attachment error: "+err.Error()), message.MessageID); sendErr != nil {
+		if sendErr := b.deliverFinal(ctx, route, channel.ErrorResponse("Spynel attachment error: "+err.Error()), message.MessageID, message.From); sendErr != nil {
 			b.logTextDeliveryFailure(deliveryFinal, sendErr)
 		}
 		setActivity(false)
@@ -592,14 +722,14 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 			text = channel.ErrorResponse(text)
 		}
 		if text != "" {
-			if err := b.send(ctx, route, text, message.MessageID); err != nil {
+			if err := b.deliverFinal(ctx, route, text, message.MessageID, message.From); err != nil {
 				b.logTextDeliveryFailure(deliveryFinal, err)
 			}
 			message.MessageID = 0
 		}
 		for _, attachment := range event.Attachments {
 			if err := b.sendAttachment(ctx, route, attachment, message.MessageID); err != nil {
-				if sendErr := b.send(ctx, route, channel.ErrorResponse("Spynel attachment delivery error: "+err.Error()), message.MessageID); sendErr != nil {
+				if sendErr := b.deliverFinal(ctx, route, channel.ErrorResponse("Spynel attachment delivery error: "+err.Error()), message.MessageID, message.From); sendErr != nil {
 					b.logTextDeliveryFailure(deliveryFinal, sendErr)
 				}
 			}
@@ -616,7 +746,7 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 	}, emit)
 	if err != nil {
 		setActivity(false)
-		if sendErr := b.send(ctx, route, channel.ErrorResponse(err.Error()), message.MessageID); sendErr != nil {
+		if sendErr := b.deliverFinal(ctx, route, channel.ErrorResponse(err.Error()), message.MessageID, message.From); sendErr != nil {
 			b.logTextDeliveryFailure(deliveryFinal, sendErr)
 		}
 		return

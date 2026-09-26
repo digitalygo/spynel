@@ -1013,7 +1013,7 @@ func buildService(cfg config.Config, version string) (*app.Service, error) {
 	return service, nil
 }
 
-func startChannels(ctx context.Context, service *app.Service, report channel.StatusReporter) (<-chan error, error) {
+func startChannels(ctx context.Context, service *app.Service, report channel.StatusReporter, replies *telegram.ReplyWorker) (<-chan error, error) {
 	initial := service.Settings.Snapshot()
 	cacheRoot, cacheErr := media.SpeechCacheDir()
 	if err := speechCacheStartupFailure(initial.Speech, cacheErr); err != nil {
@@ -1037,6 +1037,14 @@ func startChannels(ctx context.Context, service *app.Service, report channel.Sta
 				bot := telegram.NewWithIdentityStore(cfg.Channels.Telegram, cfg.TelegramToken(), cfg.StatePath("runtime", "telegram-identities.json"))
 				bot.SetNoticeReporter(service.SetNotice)
 				bot.SetCommands(app.TelegramCommands())
+				// The live resolver keeps queued and ordinary outbound authorization
+				// bound to the current allow-list rather than this build snapshot.
+				bot.SetAllowedUsersSource(func() []string {
+					return service.Settings.Snapshot().Channels.Telegram.AllowedUsers
+				})
+				// The primary-term worker outlives this adapter generation and is
+				// joined with the primary term, not with a channel reconnect.
+				bot.AttachReplyWorker(replies)
 				store := &media.Store{Directory: cfg.StatePath("attachments", "telegram"), MaxBytes: int64(cfg.Workspace.AttachmentMaxMB) * 1024 * 1024}
 				bot.SetMedia(store, speechTranscriber(cfg.Speech, parakeet, elevenlabs))
 				bot.SetTranscriptEcho(cfg.Speech.TranscriptEcho)
