@@ -35,12 +35,14 @@ supporting_docs:
   - ../../../docs/architecture.md
   - ../../../docs/cli.md
   - ../../../docs/integrations.md
+  - ../../../docs/releasing.md
   - ../../../docs/troubleshooting.md
   - https://core.telegram.org/api/forum
   - https://core.telegram.org/bots/api
   - https://core.telegram.org/bots/api#formatting-options
   - https://core.telegram.org/bots/faq
   - https://github.com/digitalygo/spynel/releases/tag/v1.2.0
+  - https://github.com/digitalygo/spynel/releases/tag/v2.0.2
 ---
 
 # Telegram topic conversations and bounded rich-text replies
@@ -189,3 +191,28 @@ The queue is bounded to 128 records, 16 per conversation, 512 KiB per record, 16
 - Baseline for this update: `8e75cd536bc3826e5d9d79d76e8f80946b09346d` plus previously uncommitted short-retry documentation, recorded in `substrate/traces/status/2026-09-26-telegram-durable-replies-workspace-state.md`. The winning implementation was preserved as `4e41933` during an interrupted review and corrected as `afcf0ef`; the other race member produced no code. Only intended source and test files were merged into `main`, with pre-existing documentation changes preserved.
 - The orchestrator ran `scripts/dev.sh dox` (49 tracked directories), `go test ./...`, `go vet ./...`, a host `go build -o .tmp-bin/spynel ./cmd/spynel`, `scripts/smoke.sh`, `go test -race -count=1 ./internal/channel/telegram ./internal/cli`, `go test -cover ./internal/channel/telegram` (84.6% statement coverage), and `git diff --check`; all passed. The pre-existing `.ai-telemetry/` was temporarily ignored only through local Git metadata for DOX/smoke without changing its contents.
 - The judgment quality gate returned `PASS` for behavioral tests, durable storage, scheduling, and synchronized documentation. The focused security gate returned `PASS` for term fencing, authorization, private bounded state, and content-free logs. All tests were local and mock-backed; this update did not contact live Telegram, release a package, deploy or restart the running installation.
+
+## Update 2026-09-26: v2.0.2 publication and pending local update
+
+### Summary of changes
+
+The durable queue and short-retry patch were committed and pushed to `main`, then published in the stable [v2.0.2 release](https://github.com/digitalygo/spynel/releases/tag/v2.0.2). The installed npm-managed bot remains at v2.0.1; no local update or live Telegram canary has been attempted in this publication step.
+
+### Technical reasoning
+
+Commit `32640a9d87afd7e754a857c5222d86554a00f02d` added the synchronized DOX, documentation, and compiled catalog to the three preceding implementation commits. The clean pre-release gate found an existing webhook-test race: a two-second test timeout was shorter than the server's five-second shutdown budget, and an unused HTTP keep-alive connection could hold teardown until its deadline. A test-only correction kept a bounded assertion for both `deleteWebhook` and listener shutdown while disabling test-client keep-alives; candidate commit `431e097e89b4c26568d7801f4609a8c76cd185e5` passed repeated targeted tests and the complete local gates. No production behavior changed in that correction.
+
+The [nonpublishing validation run](https://github.com/digitalygo/spynel/actions/runs/36243673959) on that exact commit passed verification and all four native Linux/macOS builds; `publish` was skipped. The annotated tag object `b700fa8554072b006092d9587713ad16195bc39e` peels to the same commit. Publishing the GitHub Release triggered [release run 36244086074](https://github.com/digitalygo/spynel/actions/runs/36244086074), which passed verification, four native jobs, and mandatory `publish`. The five public assets are four supported native archives plus `checksums.txt`. Published Linux amd64 archive SHA-256 `dd700ac9eb8be0c1f70ef56b14399cc7b3aa458d5bdb654e6b156183d747424b` matched the published checksum and the extracted binary reported `spynel 2.0.2`. npm `@digitalygo/spynel@2.0.2` is on `latest` with SLSA provenance v1 after a bounded registry-convergence delay.
+
+### Impact assessment
+
+- The stable release is public, but publication and local deployment remain separate actions. The local npm-managed service is still v2.0.1, with Telegram and Pi connected, no active turn, zero live jobs, and four delivered, zero pending proactive outbox entries at read-only preflight. `spynel update --json check` reports v2.0.2 available and the coordinated restartability check passes.
+- Telegram currently has two authorized senders. Spynel has no admission pause during an update: a message admitted between an idle check and process shutdown can lose its active turn, while the new queue protects only finals persisted after the update. As in the v2.0.1 deployment, local update is deferred until the operator explicitly confirms both authorized accounts will not send during the restart window. This request to update did not establish a quiet window by itself.
+- The known Linuxbrew npmrc file under the Node 24 Cellar is a regular file owned by the user at mode 0444 with SHA-256 `a0e43e04265c9fc6231f0288288e0088ea033732278f9953d65551dbb8930ccd`. If the official updater requires temporary owner-write access, its original mode, inode, and digest must be restored and verified. No permission change was made during the read-only preflight.
+
+### Validation steps
+
+- Local exact-candidate checks from a clean detached worktree passed `scripts/dev.sh dox`, `scripts/dev.sh test` (including the nested Bubble Tea module), `scripts/smoke.sh`, `npm run test:npm`, Telegram/CLI race tests, host native packaging with companion libraries and extracted `spynel 2.0.2`, `npm/prepare-release.js v2.0.2 false`, and `npm pack --dry-run` (nine files). The main tree kept the `0.0.0-development` placeholder and the pre-existing `.ai-telemetry/` remained untouched.
+- Workflow dispatch run 36243673959: `headSha=431e097e89b4c26568d7801f4609a8c76cd185e5`, `verify` and Linux/macOS amd64/arm64 builds all passed, `publish` skipped. Each retained `observed-native` evidence record reports that source commit and six passing synthetic/provider-free checks.
+- Published release run 36244086074: same source commit, `verify`, four native jobs, and `publish` all passed. Exactly five public assets were listed. Published host archive passed the published checksum; registry `latest` resolved to 2.0.2 with SLSA provenance v1.
+- Passive local preflight: installed CLI and npm package 2.0.1; managed server PID 2090417 and Node supervisor PID 2090396; Telegram connected, Pi connected, inactive turn, zero live jobs, proactive outbox four delivered/zero pending, `spynel check-restartable` successful, `spynel update --json check` shows `Current=2.0.1`, `Latest=2.0.2`, `Available=true`. The workspace and runtime directories remain at 0700, config file 0600. No package replacement or restart was attempted.
