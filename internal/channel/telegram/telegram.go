@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -53,8 +54,8 @@ type Bot struct {
 	listen            func(string, string) (net.Listener, error)
 	renamedTopicsMu   sync.Mutex
 	renamedTopics     map[string]struct{}
-	// retryWait sleeps out a provider-requested retry delay. Tests replace it
-	// to observe waits without real sleeping.
+	// retryWait sleeps out a provider-requested or transport retry delay.
+	// Tests replace it to observe waits without real sleeping.
 	retryWait func(context.Context, time.Duration) error
 }
 
@@ -67,6 +68,17 @@ const (
 	maxTopicLabelRunes = 128
 	maxRenamedTopics   = 1024
 )
+
+// Text delivery bounds. One complete sendMessage reply, including every
+// chunk, transport retry delay, rate-limit wait, and HTML parse fallback,
+// must finish inside the delivery budget. Transient transport failures are
+// retried at most twice with the fixed delays below.
+const (
+	telegramTextDeliveryBudget  = 3 * time.Minute
+	maxTelegramTransportRetries = 2
+)
+
+var telegramTransportRetryDelays = [...]time.Duration{time.Second, 2 * time.Second}
 
 func New(cfg config.Telegram, token string) *Bot {
 	return NewWithIdentityStore(cfg, token, "")
@@ -153,7 +165,11 @@ func (b *Bot) Deliver(ctx context.Context, conversation, eventID, text string) e
 	if err != nil {
 		return err
 	}
-	return b.send(ctx, route, text, 0)
+	if err := b.send(ctx, route, text, 0); err != nil {
+		b.logTextDeliveryFailure(deliveryProactive, err)
+		return err
+	}
+	return nil
 }
 
 func (b *Bot) DeliverEvent(ctx context.Context, conversation, eventID string, event core.Event) error {
@@ -195,7 +211,11 @@ func (b *Bot) DeliverEvent(ctx context.Context, conversation, eventID string, ev
 		if event.Kind == core.EventError {
 			text = channel.ErrorResponse(text)
 		}
-		return b.send(ctx, route, text, 0)
+		if err := b.send(ctx, route, text, 0); err != nil {
+			b.logTextDeliveryFailure(deliveryProactiveEvent, err)
+			return err
+		}
+		return nil
 	}
 	return nil
 }
@@ -221,18 +241,35 @@ func (b *Bot) deliveryRoute(conversation string) (Route, error) {
 // their base numeric user.
 func (b *Bot) authorizeRoutePolicy(route Route) error {
 	if route.Conversation() == "" {
-		return errors.New("invalid Telegram conversation origin")
+		return &telegramRouteAuthorizationError{message: "invalid Telegram conversation origin"}
 	}
 	if route.IsGroup() {
 		if b.config.GroupMode == "off" {
-			return errors.New("Telegram group delivery is disabled")
+			return &telegramRouteAuthorizationError{message: "Telegram group delivery is disabled"}
 		}
 		return nil
 	}
 	if !b.identity.AuthorizedPrivate(b.liveAllowedUsers(), strconv.FormatInt(route.ChatID(), 10)) {
-		return errors.New("Telegram origin is not in allowed_users")
+		return &telegramRouteAuthorizationError{message: "Telegram origin is not in allowed_users"}
 	}
 	return nil
+}
+
+// telegramRouteAuthorizationError marks one route policy refusal while
+// keeping the caller-visible message unchanged, so delivery diagnostics can
+// classify the failure without inspecting or redacting its text.
+type telegramRouteAuthorizationError struct{ message string }
+
+func (e *telegramRouteAuthorizationError) Error() string { return e.message }
+
+// isTelegramAuthorizationFailure reports whether one delivery failure came
+// from the global runtime authorization or from the live route policy.
+func isTelegramAuthorizationFailure(err error) bool {
+	if errors.Is(err, errTelegramRuntimeAuthorization) {
+		return true
+	}
+	var routeErr *telegramRouteAuthorizationError
+	return errors.As(err, &routeErr)
 }
 
 // authorizeProviderRoute reapplies the global runtime authorization and the
@@ -508,7 +545,9 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 	}
 	text, echoes, err := b.prepareMessage(ctx, message)
 	if err != nil {
-		_ = b.send(context.Background(), route, channel.ErrorResponse("Spynel attachment error: "+err.Error()), message.MessageID)
+		if sendErr := b.send(ctx, route, channel.ErrorResponse("Spynel attachment error: "+err.Error()), message.MessageID); sendErr != nil {
+			b.logTextDeliveryFailure(deliveryFinal, sendErr)
+		}
 		setActivity(false)
 		return
 	}
@@ -553,12 +592,16 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 			text = channel.ErrorResponse(text)
 		}
 		if text != "" {
-			_ = b.send(context.Background(), route, text, message.MessageID)
+			if err := b.send(ctx, route, text, message.MessageID); err != nil {
+				b.logTextDeliveryFailure(deliveryFinal, err)
+			}
 			message.MessageID = 0
 		}
 		for _, attachment := range event.Attachments {
-			if err := b.sendAttachment(context.Background(), route, attachment, message.MessageID); err != nil {
-				_ = b.send(context.Background(), route, channel.ErrorResponse("Spynel attachment delivery error: "+err.Error()), message.MessageID)
+			if err := b.sendAttachment(ctx, route, attachment, message.MessageID); err != nil {
+				if sendErr := b.send(ctx, route, channel.ErrorResponse("Spynel attachment delivery error: "+err.Error()), message.MessageID); sendErr != nil {
+					b.logTextDeliveryFailure(deliveryFinal, sendErr)
+				}
 			}
 			message.MessageID = 0
 		}
@@ -573,7 +616,9 @@ func (b *Bot) handle(ctx context.Context, handler channel.Handler, message *tele
 	}, emit)
 	if err != nil {
 		setActivity(false)
-		_ = b.send(context.Background(), route, channel.ErrorResponse(err.Error()), message.MessageID)
+		if sendErr := b.send(ctx, route, channel.ErrorResponse(err.Error()), message.MessageID); sendErr != nil {
+			b.logTextDeliveryFailure(deliveryFinal, sendErr)
+		}
 		return
 	}
 	activityMu.Lock()
@@ -854,6 +899,8 @@ func (b *Bot) updates(ctx context.Context, offset int64) ([]telegramUpdate, erro
 // reply within the 32K reply budget; delivery preserves order and stops on
 // the first unrecoverable chunk error.
 func (b *Bot) send(ctx context.Context, route Route, text string, replyTo int64) error {
+	ctx, cancel := context.WithTimeout(ctx, telegramTextDeliveryBudget)
+	defer cancel()
 	for _, chunk := range markdownfmt.TelegramChunks(text) {
 		if err := b.sendChunk(ctx, route, chunk, replyTo); err != nil {
 			return err
@@ -868,6 +915,8 @@ func (b *Bot) send(ctx context.Context, route Route, text string, replyTo int64)
 // Echoed transcripts are user content, so their characters must render
 // exactly as spoken instead of becoming formatting.
 func (b *Bot) sendPlain(ctx context.Context, route Route, text string, replyTo int64) error {
+	ctx, cancel := context.WithTimeout(ctx, telegramTextDeliveryBudget)
+	defer cancel()
 	for _, chunk := range markdownfmt.TelegramPlainChunks(text) {
 		if err := b.sendChunk(ctx, route, chunk, replyTo); err != nil {
 			return err
@@ -880,13 +929,91 @@ func (b *Bot) sendPlain(ctx context.Context, route Route, text string, replyTo i
 // sendChunk delivers one HTML chunk. If and only if Telegram rejects the
 // chunk's entities or HTML parsing, the same chunk is retried once as plain
 // text without a parse mode; unrelated failures are never downgraded.
+// Transient transport failures share one bounded retry budget across the
+// HTML attempt and its plain-text fallback, so the fallback can never
+// refresh the retry allowance.
 func (b *Bot) sendChunk(ctx context.Context, route Route, chunk string, replyTo int64) error {
-	_, err := b.callRoute(ctx, route, "sendMessage", sendMessagePayload(route, chunk, replyTo, true))
-	if err == nil || !isTelegramEntityParseFailure(err) {
-		return err
+	text := chunk
+	html := true
+	budget := &textSendBudget{}
+	for {
+		_, err := b.callRouteSend(ctx, route, "sendMessage", sendMessagePayload(route, text, replyTo, html), budget)
+		if err == nil {
+			if budget.transportRetries > 0 {
+				b.logTextDeliveryRecovered(budget.transportRetries)
+			}
+			return nil
+		}
+		if html && isTelegramEntityParseFailure(err) {
+			text = markdownfmt.TelegramChunkPlainText(chunk)
+			html = false
+			continue
+		}
+		return &textDeliveryError{err: err, attempts: budget.attempts}
 	}
-	_, err = b.callRoute(ctx, route, "sendMessage", sendMessagePayload(route, markdownfmt.TelegramChunkPlainText(chunk), replyTo, false))
-	return err
+}
+
+// Text delivery diagnostic labels. A failure is attributed either to one
+// inbound turn's final reply or to proactive outbound delivery, so operators
+// can distinguish the two call sites without any conversation content.
+const (
+	deliveryFinal          = "final reply"
+	deliveryProactive      = "proactive message"
+	deliveryProactiveEvent = "proactive event"
+)
+
+// textDeliveryError wraps one unsuccessful text delivery with the number of
+// provider requests that were actually executed for the failing chunk.
+// Diagnostics use the executed count rather than any planned retry count.
+type textDeliveryError struct {
+	err      error
+	attempts int
+}
+
+func (e *textDeliveryError) Error() string { return e.err.Error() }
+
+func (e *textDeliveryError) Unwrap() error { return e.err }
+
+// logTextDeliveryFailure records exactly one content-free diagnostic for one
+// unsuccessful text delivery. It reports the executed request count and a
+// fixed category, never payloads, chat or message identifiers, URLs,
+// provider descriptions, or credentials. Routine shutdown cancellation is
+// already surfaced through channel lifecycle state and is not logged.
+func (b *Bot) logTextDeliveryFailure(kind string, err error) {
+	if b.log == nil || err == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+	attempts := 0
+	var deliveryErr *textDeliveryError
+	if errors.As(err, &deliveryErr) {
+		attempts = deliveryErr.attempts
+	}
+	category := "unknown"
+	var apiErr *telegramAPIError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		category = "deadline"
+	case isTelegramTransportError(err):
+		category = "transport"
+	case isTelegramAuthorizationFailure(err):
+		category = "authorization"
+	case errors.As(err, &apiErr):
+		category = "provider"
+	}
+	if errors.As(err, &apiErr) {
+		_, _ = fmt.Fprintf(b.log, "telegram: %s delivery failed: category=%s code=%d attempts=%d\n", kind, category, apiErr.code, attempts)
+		return
+	}
+	_, _ = fmt.Fprintf(b.log, "telegram: %s delivery failed: category=%s attempts=%d\n", kind, category, attempts)
+}
+
+// logTextDeliveryRecovered records one content-free recovery after bounded
+// transport retries.
+func (b *Bot) logTextDeliveryRecovered(retries int) {
+	if b.log == nil || retries <= 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(b.log, "telegram: sendMessage delivery recovered after %d transport retries\n", retries)
 }
 
 // sendMessagePayload builds one sendMessage payload. Topic routes carry
@@ -999,6 +1126,15 @@ func (b *Bot) callRoute(ctx context.Context, route Route, method string, payload
 	return b.callProvider(ctx, method, payload, authorize)
 }
 
+// callRouteSend authorizes one route-bound sendMessage request immediately
+// before every attempt and runs it under a shared text-delivery retry
+// budget. It is the only provider path allowed to retry transient transport
+// failures, and every retry reauthorizes the exact route, including private
+// topic recipients and the current group policy.
+func (b *Bot) callRouteSend(ctx context.Context, route Route, method string, payload any, budget *textSendBudget) (json.RawMessage, error) {
+	return b.callProviderWithBudget(ctx, method, payload, func() error { return b.authorizeProviderRoute(route) }, budget)
+}
+
 // telegramAPIError is a typed Bot API response failure. It carries the
 // provider error code, description, and derived retry guidance without the
 // request URL, token, or message content. retryAfter is positive only for
@@ -1029,29 +1165,137 @@ func isTelegramEntityParseFailure(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.parse
 }
 
-func (b *Bot) callProvider(ctx context.Context, method string, payload any, reauthorize func() error) (json.RawMessage, error) {
-	result, err := b.callProviderOnce(ctx, method, payload)
+// telegramTransportError marks one provider request that failed before any
+// definitive Bot API response: a timeout, connection reset, closed
+// connection, or premature EOF. The stored message is already redacted,
+// and classification happens on the raw error before redaction, so a
+// retried send never has to inspect a token-bearing error.
+type telegramTransportError struct {
+	err error
+}
+
+func (e *telegramTransportError) Error() string { return e.err.Error() }
+
+func (e *telegramTransportError) Unwrap() error { return e.err }
+
+// isTelegramTransportError reports whether err was classified as a
+// transient transport failure while its raw cause was still available.
+func isTelegramTransportError(err error) bool {
+	var transportErr *telegramTransportError
+	return errors.As(err, &transportErr)
+}
+
+// isTransientTelegramTransport classifies one raw transport failure as a
+// retryable timeout, connection reset, closed connection, or premature EOF.
+// It must run before redaction, which replaces the error with an opaque
+// message that no longer exposes the cause.
+func isTransientTelegramTransport(err error) bool {
 	if err == nil {
-		return result, nil
+		return false
 	}
-	var apiErr *telegramAPIError
-	if !errors.As(err, &apiErr) || apiErr.retryAfter <= 0 || apiErr.retryAfter > maxTelegramRetryAfter {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// textSendBudget tracks the retry allowances shared by one text chunk's
+// sendMessage delivery: at most maxTelegramTransportRetries transient
+// transport retries and one provider rate-limit retry across the HTML
+// attempt and its plain-text fallback. attempts counts provider requests
+// actually executed, so diagnostics never report planned retries.
+type textSendBudget struct {
+	transportRetries int
+	rateLimitRetried bool
+	attempts         int
+}
+
+func (b *Bot) callProvider(ctx context.Context, method string, payload any, reauthorize func() error) (json.RawMessage, error) {
+	return b.callProviderWithBudget(ctx, method, payload, reauthorize, nil)
+}
+
+// callProviderWithBudget executes one provider request and applies the
+// existing single bounded rate-limit retry to every method unchanged. When
+// budget is set (the text sendMessage path only), transient transport
+// failures are additionally retried up to the shared bound, and every
+// attempt rechecks the context and reauthorizes the exact route immediately
+// before dispatch. Cancellation, authorization loss, and definitive API
+// errors are never retried. Caller-side preauthorization and the documented
+// post-revocation deleteWebhook teardown exception are unchanged for calls
+// without a retry budget.
+func (b *Bot) callProviderWithBudget(ctx context.Context, method string, payload any, reauthorize func() error, budget *textSendBudget) (json.RawMessage, error) {
+	rateLimitRetried := budget != nil && budget.rateLimitRetried
+	for {
+		// Text sendMessage attempts are dispatched only while the caller's
+		// context is live and the latest authorization admits the exact route.
+		if budget != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if authErr := reauthorize(); authErr != nil {
+				return nil, authErr
+			}
+			budget.attempts++
+		}
+		result, err := b.callProviderOnce(ctx, method, payload)
+		if err == nil {
+			return result, nil
+		}
+		if budget != nil && budget.transportRetries < maxTelegramTransportRetries && isTelegramTransportError(err) && ctx.Err() == nil {
+			delay := telegramTransportRetryDelays[budget.transportRetries]
+			budget.transportRetries++
+			if waitErr := b.waitRetry(ctx, delay); waitErr != nil {
+				return nil, waitErr
+			}
+			// The injected waiter may deliberately ignore cancellation, so the
+			// context is rechecked before any further request is dispatched.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			continue
+		}
+		var apiErr *telegramAPIError
+		if errors.As(err, &apiErr) && apiErr.retryAfter > 0 && apiErr.retryAfter <= maxTelegramRetryAfter && !rateLimitRetried {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			rateLimitRetried = true
+			if budget != nil {
+				budget.rateLimitRetried = true
+			}
+			if waitErr := b.waitRetry(ctx, apiErr.retryAfter); waitErr != nil {
+				return nil, waitErr
+			}
+			// Reapply the caller's authorization after the wait so a revocation
+			// or a recipient change during the delay cannot complete the retried
+			// provider call. Cancellation wins over any further attempt. Text
+			// sends reauthorize again at the top of the next iteration.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if budget == nil {
+				if authErr := reauthorize(); authErr != nil {
+					return nil, authErr
+				}
+			}
+			continue
+		}
 		return nil, err
 	}
+}
+
+// waitRetry sleeps for one bounded retry delay through the injected waiter,
+// honoring caller cancellation and channel shutdown.
+func (b *Bot) waitRetry(ctx context.Context, delay time.Duration) error {
 	wait := b.retryWait
 	if wait == nil {
 		wait = waitWithContext
 	}
-	if waitErr := wait(ctx, apiErr.retryAfter); waitErr != nil {
-		return nil, waitErr
-	}
-	// Reapply the caller's authorization after the wait so a revocation or a
-	// recipient change during the delay cannot complete the retried provider
-	// call.
-	if err := reauthorize(); err != nil {
-		return nil, err
-	}
-	return b.callProviderOnce(ctx, method, payload)
+	return wait(ctx, delay)
 }
 
 func (b *Bot) callProviderOnce(ctx context.Context, method string, payload any) (json.RawMessage, error) {
@@ -1066,7 +1310,7 @@ func (b *Bot) callProviderOnce(ctx context.Context, method string, payload any) 
 	request.Header.Set("Content-Type", "application/json")
 	response, err := b.client.Do(request)
 	if err != nil {
-		return nil, b.redact(err)
+		return nil, b.providerRequestError(ctx, err)
 	}
 	defer response.Body.Close()
 	var envelope struct {
@@ -1079,7 +1323,16 @@ func (b *Bot) callProviderOnce(ctx context.Context, method string, payload any) 
 		} `json:"parameters"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
-		return nil, err
+		// A non-200 status is a definitive provider response, so an empty,
+		// truncated, or malformed body must never be reclassified as an
+		// ambiguous transport failure that the text send path may retry.
+		if response.StatusCode != http.StatusOK {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, &telegramAPIError{method: method, code: response.StatusCode, description: http.StatusText(response.StatusCode)}
+		}
+		return nil, b.providerRequestError(ctx, err)
 	}
 	if response.StatusCode == http.StatusOK && envelope.OK {
 		return envelope.Result, nil
@@ -1112,6 +1365,24 @@ func (b *Bot) endpoint(method string) string {
 
 func (b *Bot) redact(err error) error {
 	return errors.New(strings.ReplaceAll(err.Error(), b.token, "<redacted>"))
+}
+
+// providerRequestError redacts one provider request failure and preserves
+// its transient-transport classification. A caller cancellation or deadline
+// is returned as the context error before redaction, so it is never retried
+// and callers can detect it with errors.Is. Classification otherwise runs
+// on the raw error before redaction replaces it with an opaque message, so
+// the returned error never contains the bot token, request URL contents, or
+// payload while still being retryable when appropriate.
+func (b *Bot) providerRequestError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	redacted := b.redact(err)
+	if !isTransientTelegramTransport(err) {
+		return redacted
+	}
+	return &telegramTransportError{err: redacted}
 }
 
 type telegramUpdate struct {
