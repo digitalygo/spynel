@@ -30,7 +30,7 @@ files_edited:
   - internal/markdown/telegram_chunks.go
   - internal/markdown/telegram_chunks_test.go
   - internal/workspace/templates/workspace-AGENTS.md
-rationale: Record Telegram topic routing, bounded HTML delivery, short transport retry, and its later durable final-reply queue with five exponential retry rounds, synchronized contracts, and verification.
+rationale: Record Telegram topic routing, bounded HTML delivery, short transport retry, the durable final-reply queue with five exponential retry rounds, its v2.0.2 release, and the user-confirmed local deployment.
 supporting_docs:
   - ../../../docs/architecture.md
   - ../../../docs/cli.md
@@ -216,3 +216,27 @@ The [nonpublishing validation run](https://github.com/digitalygo/spynel/actions/
 - Workflow dispatch run 36243673959: `headSha=431e097e89b4c26568d7801f4609a8c76cd185e5`, `verify` and Linux/macOS amd64/arm64 builds all passed, `publish` skipped. Each retained `observed-native` evidence record reports that source commit and six passing synthetic/provider-free checks.
 - Published release run 36244086074: same source commit, `verify`, four native jobs, and `publish` all passed. Exactly five public assets were listed. Published host archive passed the published checksum; registry `latest` resolved to 2.0.2 with SLSA provenance v1.
 - Passive local preflight: installed CLI and npm package 2.0.1; managed server PID 2090417 and Node supervisor PID 2090396; Telegram connected, Pi connected, inactive turn, zero live jobs, proactive outbox four delivered/zero pending, `spynel check-restartable` successful, `spynel update --json check` shows `Current=2.0.1`, `Latest=2.0.2`, `Available=true`. The workspace and runtime directories remain at 0700, config file 0600. No package replacement or restart was attempted.
+
+## Update 2026-09-26: local v2.0.2 deployment
+
+### Summary of changes
+
+After the operator confirmed a quiet window covering both authorized Telegram senders, the local npm-managed installation was updated through one official `spynel update` execution. The running server and launcher kept PIDs 2090417 and 2090396 while the primary generation changed to `bceeda55053920cd7d8bd9a8014b2602`. The CLI, npm package, and vendor metadata now report 2.0.2. No repository code or production configuration changed during deployment.
+
+### Technical reasoning
+
+The user confirmation was a separate prerequisite from the earlier authorization to publish and update: the updater cannot fence a newly admitted user message during shutdown. Immediately before running the updater, the installation-scoped restartability check passed and the live status still showed Telegram and Pi connected, zero live jobs, and an inactive turn. The update ran from the independent managed launcher under the same `HOME` as the supervisor, not from the repository binary or a process hosted by the target server. The updater stopped the old generation, replaced `@digitalygo/spynel`, and coordinated the restart of one registered server. The content-free runtime log shows `session_end` at 17:42:06 UTC, then `session_start`, `primary_started`, and Telegram `connected` by 17:42:07 UTC; no `turn_started` event appeared in that interval.
+
+The Linuxbrew npmrc was a regular file owned by the current user, mode 0444, inode 281723, with SHA-256 `a0e43e04265c9fc6231f0288288e0088ea033732278f9953d65551dbb8930ccd`. An EXIT/INT/TERM/HUP restoration trap was installed before temporarily granting owner-write access at 0644, and restored mode 0444 with the original inode and digest after the official updater returned successfully. npm printed an `allowScripts` advisory for the package's postinstall script, but the installed vendor binary and metadata independently report 2.0.2 and the service is ready; no direct npm install, killall, or manual restart was used.
+
+### Impact assessment
+
+- The durable final-reply queue is now part of the running Spynel 2.0.2 process. `.spynel/runtime/telegram-replies/` is created lazily on first enqueue, so its absence immediately after an idle restart means no records exist, not a failure. No live model message or Telegram send canary was sent; delivery behavior still rests on synthetic and mock-backed tests plus passive readiness checks.
+- Existing state was preserved: workspace and runtime modes remained 0700, config mode 0600, config SHA-256 `fb99602c2be66570acaa538aa2e13d43ade695061fbb6f9504f2091d4336e1c4`, Pi session-map SHA-256 `72d5c9f6bee40093e4a22295bbc42e5b982c43bf4bab6c8f7063a3ec8262d623`, and the proactive outbox kept four delivered and zero pending entries. No prior undelivered job, including job 388, was backfilled.
+- The quiet-window restriction ended only after the new primary reported Telegram and Pi connected with zero live jobs and an inactive turn.
+
+### Validation steps
+
+- Update request started at 17:42:01 UTC and the official launcher returned at 17:42:07 UTC reporting `spynel 2.0.2` and one coordinated server restart. The npmrc trap restored its original mode, inode, and SHA-256 after the updater returned.
+- An independent read-only recheck confirmed CLI version 2.0.2, global npm package 2.0.2, vendored binary metadata 2.0.2, same server and launcher PIDs with the new primary generation, Telegram and Pi connected, `jobs=0`, `live_jobs=0`, `turn_active=false`, and `spynel update --json check` with `Current=Latest=2.0.2` and `Available=false`.
+- Config/session-map digests and permission modes matched the preflight snapshot, the proactive outbox remained four delivered and zero pending, and no queued reply files or new message turn were observed during the update window. Release workflow run 36244086074 remained successful at the published tag commit.
