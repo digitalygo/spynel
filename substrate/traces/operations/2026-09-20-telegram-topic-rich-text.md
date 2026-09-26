@@ -1,13 +1,14 @@
 ---
 status: completed
 created_at: 2026-09-20
-updated_at: 2026-09-20
+updated_at: 2026-09-26
 files_edited:
   - AGENTS.md
   - docs/AGENTS.md
   - docs/architecture.md
   - docs/cli.md
   - docs/integrations.md
+  - docs/troubleshooting.md
   - internal/AGENTS.md
   - internal/agentdocs/agentdocs_test.go
   - internal/agentdocs/content.go
@@ -17,16 +18,24 @@ files_edited:
   - internal/channel/telegram/AGENTS.md
   - internal/channel/telegram/route.go
   - internal/channel/telegram/route_test.go
+  - internal/channel/telegram/replyqueue.go
+  - internal/channel/telegram/replyqueue_test.go
+  - internal/channel/telegram/retry_test.go
   - internal/channel/telegram/telegram.go
   - internal/channel/telegram/telegram_test.go
+  - internal/cli/AGENTS.md
+  - internal/cli/cli.go
+  - internal/cli/server_runtime.go
   - internal/markdown/AGENTS.md
   - internal/markdown/telegram_chunks.go
   - internal/markdown/telegram_chunks_test.go
-rationale: Record the completed Telegram topic-conversation routing and bounded HTML rich-text delivery work together with the synchronized documentation, DOX, and compiled agent documentation pass.
+  - internal/workspace/templates/workspace-AGENTS.md
+rationale: Record Telegram topic routing, bounded HTML delivery, short transport retry, and its later durable final-reply queue with five exponential retry rounds, synchronized contracts, and verification.
 supporting_docs:
   - ../../../docs/architecture.md
   - ../../../docs/cli.md
   - ../../../docs/integrations.md
+  - ../../../docs/troubleshooting.md
   - https://core.telegram.org/api/forum
   - https://core.telegram.org/bots/api
   - https://core.telegram.org/bots/api#formatting-options
@@ -129,3 +138,54 @@ The host-target native package passed and the extracted archive reported `spynel
 - A clean-prefix installation of exactly `@digitalygo/spynel@1.2.0` returned `spynel 1.2.0` after the brief registry edge convergence window.
 - The global npm installation reports `@digitalygo/spynel@1.2.0`, and the running primary executable resolves to the package's vendored binary; `spynel status --json` reports Telegram and Pi connected with `turn_active` false, and `spynel update --json check` reports `Current` and `Latest` both `1.2.0`.
 - `scripts/dev.sh dox` and `git diff --check` passed for this documentation-only update.
+
+## Update 2026-09-26: bounded retry for Telegram text delivery
+
+### Summary of changes
+
+The first response after a successful private-topic rename was archived in job 388 at 10:16:32 local time, but no Telegram reply arrived. The turn ended 40.003 seconds later, matching the configured HTTP request timeout; a polling connection error had appeared before the final response. The exact outbound failure cannot be proven from the old logs because final sends ignored their errors. The adapter now retries transient failures of `sendMessage` text chunks at most twice and records content-free failure diagnostics.
+
+### Technical reasoning
+
+A timeout, connection reset, closed connection, or premature EOF triggers waits of one and then two seconds. The same chunk retains its topic route, payload, and reply reference; successful prior chunks are never replayed. One complete text delivery has a three-minute budget that includes all chunks, the existing single bounded 429 retry, the entity-parse plain-text fallback, and every retry wait. The fallback cannot reset either retry allowance. The current route authorization and caller context are checked before each request; shutdown, revocation, and cancellation stop further attempts. Definitive provider failures and malformed non-200 responses do not trigger transport retries. Typing, topic naming, native attachments, and polling retain their previous transport behavior.
+
+Final reply and proactive text failures produce one content-free diagnostic with a category, optional provider code, and actual executed request count. Recovery after a transient retry records its retry count. A delivery failure does not turn successful harness execution into a failure: full output remains in history and the job archive, while `turn_completed` still describes harness completion rather than Telegram delivery. The implementation does not create a durable reply outbox or retroactively resend job 388. Telegram `sendMessage` offers no idempotency key; if it accepted a request whose response was lost, retrying that chunk can create a duplicate. This is bounded best effort, not exactly-once delivery.
+
+### Impact assessment
+
+- Remote text delivery can recover within the running process after a transient network fault. The pre-existing proactive outbox remains separate and can retry across process restarts; ordinary final replies cannot.
+- All text-send attempts use the live channel context and recheck recipient authorization, including private topics and group policy changes. Transcript-echo failures remain non-fatal.
+- The root, internal, Telegram, and docs DOX contracts, user guides, and compiled documentation now state the retry limits, duplicate edge, log behavior, and lack of durable reply recovery. No schema, configuration setting, or production installation changed.
+
+### Validation steps
+
+- The implementation race started from `273c244e8fa5c435b3e85a6acd503dfc2adff570`; one backend branch produced passing code and tests, the other produced no implementation. After independent adjudication and focused corrections, the winner was merged as `8e75cd5`.
+- Orchestrator checks passed: `scripts/dev.sh dox` (49 tracked directories), `go test ./...`, `go vet ./...`, host `go build -o .tmp-bin/spynel ./cmd/spynel`, `scripts/smoke.sh`, `go test -race -count=1 ./internal/channel/telegram`, and `git diff --check`. The pre-existing untracked `.ai-telemetry/` was temporarily excluded only from local Git metadata during the DOX check and was not modified.
+- Focused quality judgment returned `PASS`; package coverage was 88.4%, and the one newly added helper below 80% was the unused-in-production nil-waiter fallback at 75%. Focused security review returned `PASS` for authorization, cancellation, redaction, retry bounds, and topic routing. These were mock-backed checks; no live Telegram canary, release, or deployment was performed.
+
+## Update 2026-09-26: durable queue for final Telegram text
+
+### Summary of changes
+
+The short in-process retry described above cannot cover the roughly fifteen-minute gap between job 388's final response and the observed polling reconnection, nor survive a process restart. This update supersedes the earlier no-durable-reply policy for **new** terminal Telegram text and direct handler errors. A primary-term worker now enqueues and delivers their rendered chunks from `.spynel/runtime/telegram-replies/`. Job 388 was not backfilled; its outbound failure was never proven from the old logs, and a polling error does not establish whether `sendMessage` was reachable.
+
+### Technical reasoning
+
+One reply is rendered after the application has applied hooks, media processing, and the downstream Pi session notice. The Telegram adapter persists the resulting HTML chunks, their plain-text fallbacks, route, verified bot account, original group sender, and first-chunk reply reference in one private atomic plaintext record. Records retain a contiguous acknowledged-chunk cursor and a fenced claim with an absolute deadline, nonce, and revision. The worker persists a reserved delivery round before calling Telegram, advances the cursor after each confirmed chunk, and persists full acknowledgment before unlinking the file. Crashes or lost provider acknowledgments can duplicate only the unconfirmed current chunk; an acknowledged earlier chunk is not replayed. A failed unlink leaves an acknowledged record for cleanup, not redelivery.
+
+The schedule is one initial round plus **five** retry rounds, waiting 30 seconds, one minute, two minutes, four minutes, and eight minutes after each failed round finishes. Each round has a three-minute deadline below its four-minute claim. A usable 429 delay of at most 60 seconds can postpone the next scheduled round but never adds another round; a provider HTML entity rejection can downgrade its current chunk once to the persisted plain representation. The queued path does not use the short one-second/two-second retries. Exhaustion, permanent provider refusal, and recipient revocation stop network sends; the record is retained until its one-hour expiry, then deleted while a primary is running. The owner-term worker operates independently of the Telegram polling generation and continues expiry maintenance while the adapter is disabled. Only the exact owner can mutate persisted state, and the bot account plus live recipient, route, group policy, and original group sender are checked again before each request.
+
+The queue is bounded to 128 records, 16 per conversation, 512 KiB per record, 16 MiB total, four concurrent routes, and FIFO order per route. Enqueue or storage failure logs content-free evidence and never falls back to an untracked direct send. Private 0700 directory and 0600 regular files, symlink rejection, bounded scanning, and strict current-schema validation protect the private payload. Direct transcript echoes, welcomes, proactive messages, and native attachments retain their existing behavior; an attachment may arrive before delayed final text. A completed harness job still does not assert successful remote delivery, and Telegram provides no exactly-once guarantee.
+
+### Impact assessment
+
+- New terminal replies and errors may survive network outages lasting through the fifth retry and process restarts. Five attempts do not guarantee delivery; each record expires one hour after creation. A stopped server cannot clean up until a primary runs again.
+- Pending queue files contain the rendered reply, including a downstream Pi session notice when present, but no queue record is inserted into conversation history or the job archive. The earlier Pi contract that the notice is absent from **history, archive, and model-visible input** remains true; it is now present temporarily in private queue storage.
+- Native attachments do not enter the queue and are not replayed after restart. Pre-queue failures, including job 388, are not reconstructed or resent. The proactive notification outbox remains separate.
+- Root, channel, CLI, workspace-template and documentation DOX, public docs, and compiled agent documentation were updated to distinguish durable final text from the pre-existing direct short-retry families.
+
+### Validation steps
+
+- Baseline for this update: `8e75cd536bc3826e5d9d79d76e8f80946b09346d` plus previously uncommitted short-retry documentation, recorded in `substrate/traces/status/2026-09-26-telegram-durable-replies-workspace-state.md`. The winning implementation was preserved as `4e41933` during an interrupted review and corrected as `afcf0ef`; the other race member produced no code. Only intended source and test files were merged into `main`, with pre-existing documentation changes preserved.
+- The orchestrator ran `scripts/dev.sh dox` (49 tracked directories), `go test ./...`, `go vet ./...`, a host `go build -o .tmp-bin/spynel ./cmd/spynel`, `scripts/smoke.sh`, `go test -race -count=1 ./internal/channel/telegram ./internal/cli`, `go test -cover ./internal/channel/telegram` (84.6% statement coverage), and `git diff --check`; all passed. The pre-existing `.ai-telemetry/` was temporarily ignored only through local Git metadata for DOX/smoke without changing its contents.
+- The judgment quality gate returned `PASS` for behavioral tests, durable storage, scheduling, and synchronized documentation. The focused security gate returned `PASS` for term fencing, authorization, private bounded state, and content-free logs. All tests were local and mock-backed; this update did not contact live Telegram, release a package, deploy or restart the running installation.

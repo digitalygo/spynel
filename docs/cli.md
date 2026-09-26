@@ -20,7 +20,7 @@ Static topics describe user commands, workflow contracts, and implementation arc
 
 `/log`, its page ranges, and case-insensitive search read the same retained newest-4,096-entry view after restart. `/log page <start>-<end>` accepts any positive ascending range and clamps the requested end to the oldest available retained page before rendering. Private JSONL session files live under `.spynel/runtime/logs`, rotate at 2 MiB, and retain at most eight files. `/log clear` removes both the active view and those retained files. Stored entries are attributed and bounded, with terminal controls and common credential forms removed before persistence.
 
-Runtime logs contain application diagnostics; per-job archives contain the ordered provider-neutral event stream for one numbered job generation. `/log clear` does not delete job archives. `/cleanup [days]` owns their age-based retention.
+Runtime logs contain application diagnostics; per-job archives contain the ordered provider-neutral event stream for one numbered job generation. `/log clear` does not delete job archives. `/cleanup [days]` owns their age-based retention. A failed Telegram final text send appears in `/log` content-free, and its terminal reply or error record is retried from the private `.spynel/runtime/telegram-replies/` queue on a bounded schedule for up to one hour before expiry. The complete response stays in `/job output <number>` and history, a failed delivery never fails the job, and an expired reply is never retroactively resent.
 
 ## Proactive notifications
 
