@@ -150,9 +150,12 @@ func (s *replyQueueSender) count() int {
 type fakeReplyBot struct {
 	mu          sync.Mutex
 	id          int64
+	gen         uint64
 	sender      *replyQueueSender
 	authorizeFn func(replyRecord) error
 }
+
+func (f *fakeReplyBot) generation() uint64 { return f.gen }
 
 func (f *fakeReplyBot) accountID() int64 {
 	f.mu.Lock()
@@ -202,8 +205,8 @@ func newReplyQueueFixtureIn(t *testing.T, dir string, clock *replyQueueClock) *r
 	queue.guard = election.Guard("owner-1")
 	queue.newNonce = nonceGenerator()
 	queue.logf = func(line string) { logs.WriteString(line + "\n") }
-	bot := &fakeReplyBot{id: 7, sender: sender}
-	queue.attachBot(bot)
+	bot := &fakeReplyBot{id: 7, gen: 1, sender: sender}
+	queue.attachBot(context.Background(), bot)
 	return &replyQueueFixture{queue: queue, dir: dir, clock: clock, logs: logs, sender: sender, bot: bot, election: election}
 }
 
@@ -1387,6 +1390,339 @@ func TestReplyQueuePreservesRouteFIFO(t *testing.T) {
 	}
 }
 
+// TestReplyQueueTakeoverKeepsClaimedHeadAheadOfYoungerReplies proves that a
+// cross-process takeover never lets a younger same-route reply overtake the
+// claimed head, and that stopped or expired heads release the route once
+// their state is resolved.
+func TestReplyQueueTakeoverKeepsClaimedHeadAheadOfYoungerReplies(t *testing.T) {
+	t.Run("live claim blocks the younger reply until reclaimed", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "telegram-replies")
+		clock := newReplyQueueClock()
+		election := newFakeElection("gen-a")
+		first := newReplyQueueFixtureIn(t, dir, clock)
+		first.queue.owner = "gen-a"
+		first.queue.guard = election.Guard("gen-a")
+		first.sender.fn = func(int, recordedReplySend) error {
+			// Ownership moves on while the head attempt is still in flight, so
+			// the first generation can neither finish nor persist its failure.
+			election.SetOwner("gen-b")
+			return errors.New("crash")
+		}
+		first.enqueue(t, "TG-7", "older reply", 0)
+		first.enqueue(t, "TG-7", "younger reply", 0)
+		first.oneSweep(t)
+		if first.sender.count() != 1 {
+			t.Fatalf("first generation sends = %d, want only the claimed head", first.sender.count())
+		}
+
+		second := newReplyQueueFixtureIn(t, dir, clock)
+		second.queue.owner = "gen-b"
+		second.queue.guard = election.Guard("gen-b")
+		second.oneSweep(t)
+		if second.sender.count() != 0 {
+			t.Fatalf("successor dispatched the younger reply behind a live claim: %#v", second.sender.snapshot())
+		}
+
+		clock.Advance(replyQueueClaimDuration + time.Second)
+		second.drain(t)
+		sends := second.sender.snapshot()
+		if len(sends) != 2 {
+			t.Fatalf("successor sends = %d, want the head then the younger reply", len(sends))
+		}
+		if sends[0].text != markdownfmt.TelegramChunks("older reply")[0] || sends[1].text != markdownfmt.TelegramChunks("younger reply")[0] {
+			t.Fatalf("post-takeover order = %#v, want the head before the younger reply", sends)
+		}
+		if first.sender.count() != 1 {
+			t.Fatalf("old generation sent after losing ownership: %d", first.sender.count())
+		}
+		if headers := second.records(t); len(headers) != 0 {
+			t.Fatalf("records after successor delivery = %#v, want none", headers)
+		}
+	})
+
+	t.Run("stopped head never blocks the younger reply", func(t *testing.T) {
+		f := newReplyQueueFixture(t)
+		f.sender.fn = func(call int, _ recordedReplySend) error {
+			if call == 1 {
+				return &telegramAPIError{method: "sendMessage", code: http.StatusBadRequest, description: "provider refusal"}
+			}
+			return nil
+		}
+		f.enqueue(t, "TG-7", "older reply", 0)
+		f.enqueue(t, "TG-7", "younger reply", 0)
+		f.drain(t)
+		sends := f.sender.snapshot()
+		if len(sends) != 2 {
+			t.Fatalf("sends = %d, want the stopped head plus the younger reply", len(sends))
+		}
+		if sends[1].text != markdownfmt.TelegramChunks("younger reply")[0] {
+			t.Fatalf("younger reply = %#v, want delivery after the stopped head", sends[1])
+		}
+		headers := f.records(t)
+		if len(headers) != 1 || headers[0].record.StopReason != replyStopPermanent {
+			t.Fatalf("records after stopped head = %#v, want only the retained permanent head", headers)
+		}
+	})
+
+	t.Run("expired head cleanup releases the younger reply", func(t *testing.T) {
+		f := newReplyQueueFixture(t)
+		f.enqueue(t, "TG-7", "older reply", 0)
+		f.clock.Advance(replyQueueExpiry + time.Second)
+		f.enqueue(t, "TG-7", "younger reply", 0)
+		f.drain(t)
+		sends := f.sender.snapshot()
+		if len(sends) != 1 {
+			t.Fatalf("sends = %d, want only the younger reply after head expiry", len(sends))
+		}
+		if sends[0].text != markdownfmt.TelegramChunks("younger reply")[0] {
+			t.Fatalf("delivered reply = %#v, want the younger reply", sends[0])
+		}
+		if headers := f.records(t); len(headers) != 0 {
+			t.Fatalf("records after expiry = %#v, want none", headers)
+		}
+		assertQueueLog(t, f.logs.String(), "telegram: reply queue expired")
+	})
+
+	t.Run("expired record with a live claim still blocks until the claim clears", func(t *testing.T) {
+		f := newReplyQueueFixture(t)
+		f.enqueue(t, "TG-7", "older reply", 0)
+		f.enqueue(t, "TG-7", "younger reply", 0)
+		headers := f.records(t)
+		older := headers[0]
+		if older.record.Conversation != "TG-7" || older.record.Acked != 0 {
+			t.Fatalf("unexpected head record %#v", older.record)
+		}
+		// Simulate a generation that died mid-attempt just before the record
+		// expiry: the claim outlives the record's expiry window.
+		older.record.Revision++
+		older.record.ExpiresAt = f.clock.Now().Add(time.Second)
+		older.record.Attempts = 1
+		older.record.Claim = &replyClaim{
+			Owner:            "gen-a",
+			Nonce:            "0000000000000001",
+			Until:            f.clock.Now().Add(replyQueueClaimDuration),
+			PreviousAttempts: 0,
+		}
+		writeRawRecord(t, f.dir, older.name, older.record)
+		f.oneSweep(t)
+		if f.sender.count() != 0 {
+			t.Fatalf("successor bypassed a claimed head: %#v", f.sender.snapshot())
+		}
+		f.clock.Advance(2 * time.Second)
+		f.oneSweep(t)
+		if f.sender.count() != 0 {
+			t.Fatalf("expired head released the route before its claim cleared: %#v", f.sender.snapshot())
+		}
+		f.clock.Advance(replyQueueClaimDuration)
+		f.drain(t)
+		sends := f.sender.snapshot()
+		if len(sends) != 1 || sends[0].text != markdownfmt.TelegramChunks("younger reply")[0] {
+			t.Fatalf("sends after claim clearing = %#v, want the younger reply only", sends)
+		}
+		if headers := f.records(t); len(headers) != 0 {
+			t.Fatalf("records after cleanup = %#v, want none", headers)
+		}
+	})
+}
+
+// TestReplyQueueRoundDeadlineSpendsOnlyExpiredAttempts proves one reserved
+// delivery round shares the ordinary text budget: expiry spends the attempt
+// and schedules the next round from the failure, while owner cancellation
+// refunds the unspent reservation.
+func TestReplyQueueRoundDeadlineSpendsOnlyExpiredAttempts(t *testing.T) {
+	start := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	t.Run("deadline expiry spends the round and schedules after completion", func(t *testing.T) {
+		f := newReplyQueueFixture(t)
+		f.sender.fn = func(call int, _ recordedReplySend) error {
+			if call == 1 {
+				f.clock.Advance(replyQueueRoundBudget + time.Second)
+				return &telegramTransportError{err: errors.New("redacted timeout")}
+			}
+			return nil
+		}
+		f.enqueue(t, "TG-7", "deadline reply", 0)
+		f.drain(t)
+		headers := f.records(t)
+		if len(headers) != 1 {
+			t.Fatalf("records after deadline = %d, want 1", len(headers))
+		}
+		record := headers[0].record
+		if record.Attempts != 1 || record.Stopped {
+			t.Fatalf("record after deadline = %#v, want one spent retryable attempt", record)
+		}
+		wantNext := start.Add(replyQueueRoundBudget + time.Second + 30*time.Second)
+		if !record.NextAttempt.Equal(wantNext) {
+			t.Fatalf("next attempt = %s, want %s", record.NextAttempt, wantNext)
+		}
+		f.clock.Advance(29 * time.Second)
+		f.drain(t)
+		if f.sender.count() != 1 {
+			t.Fatalf("retry fired before the post-deadline delay: %d sends", f.sender.count())
+		}
+		f.clock.Advance(time.Second)
+		f.drain(t)
+		if f.sender.count() != 2 {
+			t.Fatalf("attempts after the scheduled round = %d, want 2", f.sender.count())
+		}
+		assertQueueLog(t, f.logs.String(), "telegram: reply queue retry round=1")
+	})
+
+	t.Run("no new chunk starts after the deadline", func(t *testing.T) {
+		longText := strings.Repeat("e", markdownfmt.TelegramMaxVisiblePerMessage) + "tail"
+		chunks := markdownfmt.TelegramChunks(longText)
+		if len(chunks) != 2 {
+			t.Fatal("fixture must produce two chunks")
+		}
+		f := newReplyQueueFixture(t)
+		f.sender.fn = func(call int, _ recordedReplySend) error {
+			if call == 1 {
+				f.clock.Advance(replyQueueRoundBudget + time.Second)
+			}
+			return nil
+		}
+		f.enqueue(t, "TG-7", longText, 0)
+		f.drain(t)
+		sends := f.sender.snapshot()
+		if len(sends) != 1 || sends[0].text != chunks[0] {
+			t.Fatalf("sends after the deadline = %#v, want only the pre-deadline chunk", sends)
+		}
+		headers := f.records(t)
+		if len(headers) != 1 || headers[0].record.Acked != 1 || headers[0].record.Attempts != 1 {
+			t.Fatalf("record after the deadline = %#v, want acked:1 with one spent attempt", headers)
+		}
+	})
+
+	t.Run("owner cancellation refunds the round", func(t *testing.T) {
+		f := newReplyQueueFixture(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		f.sender.fn = func(int, recordedReplySend) error {
+			cancel()
+			return context.Canceled
+		}
+		f.enqueue(t, "TG-7", "cancelled reply", 0)
+		f.queue.sweep(ctx)
+		f.queue.waitIdle()
+		headers := f.records(t)
+		if len(headers) != 1 {
+			t.Fatalf("records after cancellation = %d, want 1", len(headers))
+		}
+		record := headers[0].record
+		if record.Attempts != 0 || record.Claim != nil || record.Stopped {
+			t.Fatalf("record after owner cancellation = %#v, want an unspent refunded reservation", record)
+		}
+		if !record.NextAttempt.IsZero() {
+			t.Fatalf("refunded next attempt = %s, want the previous unset value", record.NextAttempt)
+		}
+		assertQueueLog(t, f.logs.String(), "telegram: reply queue suppressed reason=suspended")
+	})
+}
+
+// TestReplyQueueRetryDelayStartsAfterFailure proves the scheduled wait is
+// measured from the failed attempt's completion instead of its reservation,
+// so a slow attempt never shortens its own backoff, and that a provider
+// retry_after is honored only when it lands later than that wait.
+func TestReplyQueueRetryDelayStartsAfterFailure(t *testing.T) {
+	start := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	t.Run("slow transport failure waits from completion", func(t *testing.T) {
+		f := newReplyQueueFixture(t)
+		f.sender.fn = func(call int, _ recordedReplySend) error {
+			if call == 1 {
+				f.clock.Advance(40 * time.Second)
+				return &telegramTransportError{err: errors.New("redacted timeout")}
+			}
+			return nil
+		}
+		f.enqueue(t, "TG-7", "slow failure", 0)
+		f.drain(t)
+		headers := f.records(t)
+		if len(headers) != 1 {
+			t.Fatalf("records after slow failure = %d, want 1", len(headers))
+		}
+		wantNext := start.Add(70 * time.Second)
+		if got := headers[0].record.NextAttempt; !got.Equal(wantNext) {
+			t.Fatalf("next attempt = %s, want %s (completion + the 30s first delay)", got, wantNext)
+		}
+		// The old reservation-relative schedule would have retried at start+30s.
+		f.clock.Advance(29 * time.Second)
+		f.drain(t)
+		if f.sender.count() != 1 {
+			t.Fatalf("retry fired before completion + delay: %d sends", f.sender.count())
+		}
+		f.clock.Advance(time.Second)
+		f.drain(t)
+		if f.sender.count() != 2 {
+			t.Fatalf("retry after completion + delay = %d sends, want 2", f.sender.count())
+		}
+		if headers := f.records(t); len(headers) != 0 {
+			t.Fatalf("records after recovery = %#v, want none", headers)
+		}
+	})
+
+	t.Run("bounded 429 waits from completion and honors the later delay", func(t *testing.T) {
+		f := newReplyQueueFixture(t)
+		f.sender.fn = func(call int, _ recordedReplySend) error {
+			if call == 1 {
+				f.clock.Advance(40 * time.Second)
+				return &telegramAPIError{method: "sendMessage", code: http.StatusTooManyRequests, retryAfter: 45 * time.Second}
+			}
+			return nil
+		}
+		f.enqueue(t, "TG-7", "slow rate limit", 0)
+		f.drain(t)
+		headers := f.records(t)
+		if len(headers) != 1 {
+			t.Fatalf("records after 429 = %d, want 1", len(headers))
+		}
+		wantNext := start.Add(time.Minute + 25*time.Second) // completion + the later 45s retry_after
+		if got := headers[0].record.NextAttempt; !got.Equal(wantNext) {
+			t.Fatalf("next attempt = %s, want %s", got, wantNext)
+		}
+		f.clock.Advance(44 * time.Second)
+		f.drain(t)
+		if f.sender.count() != 1 {
+			t.Fatalf("retry fired before the provider retry_after: %d sends", f.sender.count())
+		}
+		f.clock.Advance(time.Second)
+		f.drain(t)
+		if f.sender.count() != 2 {
+			t.Fatalf("retry after retry_after = %d sends, want 2", f.sender.count())
+		}
+	})
+
+	t.Run("short retry_after yields to the scheduled round", func(t *testing.T) {
+		f := newReplyQueueFixture(t)
+		f.sender.fn = func(call int, _ recordedReplySend) error {
+			if call == 1 {
+				f.clock.Advance(40 * time.Second)
+				return &telegramAPIError{method: "sendMessage", code: http.StatusTooManyRequests, retryAfter: 10 * time.Second}
+			}
+			return nil
+		}
+		f.enqueue(t, "TG-7", "short rate limit", 0)
+		f.drain(t)
+		headers := f.records(t)
+		if len(headers) != 1 {
+			t.Fatalf("records after 429 = %d, want 1", len(headers))
+		}
+		wantNext := start.Add(70 * time.Second) // completion + the later 30s scheduled round
+		if got := headers[0].record.NextAttempt; !got.Equal(wantNext) {
+			t.Fatalf("next attempt = %s, want %s", got, wantNext)
+		}
+		f.clock.Advance(29 * time.Second)
+		f.drain(t)
+		if f.sender.count() != 1 {
+			t.Fatalf("short retry_after fired early: %d sends", f.sender.count())
+		}
+		f.clock.Advance(time.Second)
+		f.drain(t)
+		if f.sender.count() != 2 {
+			t.Fatalf("scheduled round after slow 429 = %d sends, want 2", f.sender.count())
+		}
+	})
+}
+
 func TestReplyQueueWorkerLoopsAndJoins(t *testing.T) {
 	f := newReplyQueueFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1419,7 +1755,7 @@ func newQueuedBot(t *testing.T, probe *telegramSendProbe, allowed []string, dire
 	worker.queue.now = clock.Now
 	worker.queue.newNonce = nonceGenerator()
 	bot.AttachReplyWorker(worker)
-	worker.queue.attachBot(bot)
+	worker.queue.attachBot(context.Background(), bot)
 	return bot, worker
 }
 
@@ -1888,7 +2224,7 @@ func TestTelegramQueuedFinalUsesLiveAllowedUsersSource(t *testing.T) {
 	worker.queue.now = clock.Now
 	worker.queue.newNonce = nonceGenerator()
 	bot.AttachReplyWorker(worker)
-	worker.queue.attachBot(bot)
+	worker.queue.attachBot(context.Background(), bot)
 	route, err := ParseConversation("TG-7")
 	if err != nil {
 		t.Fatal(err)
@@ -1997,4 +2333,232 @@ func queuedRecordForTest(bot *Bot, conversation, text string) replyRecord {
 		plain[index] = markdownfmt.TelegramChunkPlainText(chunk)
 	}
 	return replyRecord{BotID: bot.me.ID, Conversation: conversation, SenderID: 7, HTML: chunks, Plain: plain}
+}
+
+// TestReplyQueueSkipsIneligibleHeadsBeforeConcurrencySlot proves an older
+// foreign-account or bot-less head never consumes one of the bounded
+// concurrency slots, so a deliverable route still dispatches in the same
+// sweep while per-route FIFO is preserved.
+func TestReplyQueueSkipsIneligibleHeadsBeforeConcurrencySlot(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previous)
+
+	f := newReplyQueueFixture(t)
+	foreign := func(conversation string) {
+		t.Helper()
+		record := f.record(conversation, "foreign "+conversation, 0)
+		record.BotID = 99
+		if err := f.queue.enqueue(record); err != nil {
+			t.Fatalf("enqueue foreign %s: %v", conversation, err)
+		}
+		f.clock.Advance(time.Millisecond)
+	}
+	// Four older foreign-account routes would occupy every concurrency slot
+	// if sweep admitted ineligible heads.
+	for _, conversation := range []string{"TG-1", "TG-2", "TG-3", "TG-4"} {
+		foreign(conversation)
+	}
+	// A current-account record behind a foreign head stays FIFO-blocked on
+	// its route and must not be dispatched either.
+	foreign("TG-5")
+	f.enqueue(t, "TG-5", "current behind foreign head", 0)
+	f.enqueue(t, "TG-7", "current route", 0)
+
+	f.oneSweep(t)
+	sends := f.sender.snapshot()
+	if len(sends) != 1 {
+		t.Fatalf("sends = %d, want only the deliverable route", len(sends))
+	}
+	if got := sends[0].route.Conversation(); got != "TG-7" {
+		t.Fatalf("delivered route = %q, want TG-7", got)
+	}
+	headers := f.records(t)
+	if len(headers) != 6 {
+		t.Fatalf("records after sweep = %d, want four foreign routes plus the foreign head and its follower", len(headers))
+	}
+	for _, header := range headers {
+		if header.record.Attempts != 0 || header.record.Claim != nil {
+			t.Fatalf("ineligible record spent delivery state: %#v", header.record)
+		}
+	}
+}
+
+// TestReplyQueueBotGenerationProtectsReplacement proves the queue refuses a
+// stale or cancelled registration and that an older generation's detach can
+// never clear a newer replacement.
+func TestReplyQueueBotGenerationProtectsReplacement(t *testing.T) {
+	q := newReplyQueue(filepath.Join(t.TempDir(), "telegram-replies"))
+	q.now = newReplyQueueClock().Now
+	q.newNonce = nonceGenerator()
+	older := &fakeReplyBot{id: 11, gen: 1, sender: &replyQueueSender{}}
+	newer := &fakeReplyBot{id: 22, gen: 2, sender: &replyQueueSender{}}
+
+	if !q.attachBot(context.Background(), older) {
+		t.Fatal("initial generation was refused")
+	}
+	if !q.attachBot(context.Background(), newer) {
+		t.Fatal("replacement generation was refused")
+	}
+	if got := q.activeBot(); got != newer {
+		t.Fatalf("active bot = %#v, want the replacement", got)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if q.attachBot(cancelled, older) {
+		t.Fatal("a cancelled stale generation registered over the replacement")
+	}
+	if got := q.activeBot(); got != newer {
+		t.Fatalf("active bot after stale attach = %#v, want the replacement", got)
+	}
+	q.detachBot(older)
+	if got := q.activeBot(); got != newer {
+		t.Fatalf("stale detach removed the replacement: %#v", got)
+	}
+	q.detachBot(newer)
+	if got := q.activeBot(); got != nil {
+		t.Fatalf("active bot after replacement detach = %#v, want none", got)
+	}
+}
+
+// TestBotRunRefusesDelayedGetMeAfterReplacement drives the real Run boundary:
+// a first run whose getMe response arrives after a replacement registered
+// (and after the stale run was cancelled or revoked) must neither displace
+// the replacement nor clear it on exit.
+func TestBotRunRefusesDelayedGetMeAfterReplacement(t *testing.T) {
+	run := func(t *testing.T, cancelStale bool) {
+		t.Helper()
+		worker := NewReplyWorker(filepath.Join(t.TempDir(), "telegram-replies"), "test-owner", nil, nil)
+		worker.queue.newNonce = nonceGenerator()
+
+		oldStarted := make(chan struct{})
+		releaseOld := make(chan struct{})
+		var startedOnce sync.Once
+		transport := telegramRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			path := request.URL.Path
+			switch {
+			case strings.HasSuffix(path, "/getMe") && strings.HasPrefix(path, "/botold/"):
+				startedOnce.Do(func() { close(oldStarted) })
+				<-releaseOld
+				return telegramJSONResponse(http.StatusOK, `{"ok":true,"result":{"id":11,"is_bot":true,"username":"stale_bot"}}`), nil
+			case strings.HasSuffix(path, "/getMe"):
+				return telegramJSONResponse(http.StatusOK, `{"ok":true,"result":{"id":22,"is_bot":true,"username":"current_bot"}}`), nil
+			case strings.HasSuffix(path, "/getUpdates"):
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			default:
+				return telegramOKResponse(), nil
+			}
+		})
+
+		oldBot := New(config.Telegram{AllowedUsers: []string{"7"}, PollTimeoutSec: 30}, "old")
+		oldBot.client.Transport = transport
+		oldBot.AttachReplyWorker(worker)
+		replacement := New(config.Telegram{AllowedUsers: []string{"7"}, PollTimeoutSec: 30}, "new")
+		replacement.client.Transport = transport
+		replacement.AttachReplyWorker(worker)
+		if replacement.generation() <= oldBot.generation() {
+			t.Fatalf("generations = stale %d replacement %d, want the replacement to be newer", oldBot.generation(), replacement.generation())
+		}
+
+		oldCtx, cancelOld := context.WithCancel(context.Background())
+		defer cancelOld()
+		oldDone := make(chan error, 1)
+		go func() {
+			oldDone <- oldBot.Run(oldCtx, func(context.Context, core.Message, core.Emit) error { return nil })
+		}()
+		select {
+		case <-oldStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stale getMe never reached the transport")
+		}
+
+		newCtx, cancelNew := context.WithCancel(context.Background())
+		newDone := make(chan error, 1)
+		go func() {
+			newDone <- replacement.Run(newCtx, func(context.Context, core.Message, core.Emit) error { return nil })
+		}()
+		waitForCondition(t, "replacement registration", func() bool { return worker.queue.activeBot() == replacement })
+
+		// The stale getMe response is released only after the replacement is
+		// registered, and only after the stale run was cancelled or revoked.
+		if cancelStale {
+			cancelOld()
+		} else {
+			oldBot.RevokeRuntimeAuthorization()
+		}
+		close(releaseOld)
+
+		select {
+		case err := <-oldDone:
+			if cancelStale && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled stale Run error = %v, want context cancellation", err)
+			}
+			if !cancelStale && !errors.Is(err, errReplyQueueGenerationLost) {
+				t.Fatalf("revoked stale Run error = %v, want a refused registration", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("stale Run did not exit after its delayed getMe")
+		}
+		if got := worker.queue.activeBot(); got != replacement {
+			t.Fatalf("active bot after delayed getMe = %#v, want the replacement", got)
+		}
+
+		cancelNew()
+		select {
+		case <-newDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("replacement Run did not exit")
+		}
+		waitForCondition(t, "replacement detach", func() bool { return worker.queue.activeBot() == nil })
+	}
+
+	t.Run("cancelled stale run", func(t *testing.T) { run(t, true) })
+	t.Run("revoked stale run", func(t *testing.T) { run(t, false) })
+}
+
+// TestReplyQueueStopsAtRecordExpiry proves no later chunk is sent once the
+// record's one-hour expiry passes mid-round, while the confirmed prefix and
+// the spent round survive until the ordinary cleanup removes the record.
+func TestReplyQueueStopsAtRecordExpiry(t *testing.T) {
+	longText := strings.Repeat("e", markdownfmt.TelegramMaxVisiblePerMessage) + "tail"
+	chunks := markdownfmt.TelegramChunks(longText)
+	if len(chunks) != 2 {
+		t.Fatal("fixture must produce two chunks")
+	}
+
+	f := newReplyQueueFixture(t)
+	f.sender.fn = func(call int, _ recordedReplySend) error {
+		if call == 1 {
+			// The first acknowledgement arrives after the record expired.
+			f.clock.Advance(20 * time.Second)
+		}
+		return nil
+	}
+	f.enqueue(t, "TG-7", longText, 0)
+	f.clock.Advance(replyQueueExpiry - 10*time.Second) // age 59m50s
+
+	f.oneSweep(t)
+	sends := f.sender.snapshot()
+	if len(sends) != 1 || sends[0].text != chunks[0] {
+		t.Fatalf("sends after expiry crossing = %#v, want only the first chunk", sends)
+	}
+	headers := f.records(t)
+	if len(headers) != 1 {
+		t.Fatalf("records after expiry crossing = %d, want the retained record", len(headers))
+	}
+	record := headers[0].record
+	if record.Acked != 1 || record.Attempts != 1 || record.Stopped || record.Claim != nil {
+		t.Fatalf("record after expiry crossing = %#v, want acked:1 with one spent non-stopped attempt", record)
+	}
+
+	// The ordinary expiry sweep removes the retained record without replaying
+	// or erasing the confirmed prefix.
+	f.oneSweep(t)
+	if headers := f.records(t); len(headers) != 0 {
+		t.Fatalf("expired record survived cleanup: %#v", headers)
+	}
+	if f.sender.count() != 1 {
+		t.Fatalf("post-expiry sends = %d, want no second chunk", f.sender.count())
+	}
+	assertQueueLog(t, f.logs.String(), "telegram: reply queue expired")
 }

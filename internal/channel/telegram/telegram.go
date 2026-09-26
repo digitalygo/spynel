@@ -42,6 +42,8 @@ type Bot struct {
 	commandMenu       []telegramBotCommand
 	transcriptEcho    bool
 	me                telegramUser
+	meMu              sync.RWMutex
+	botGeneration     uint64
 	activity          *channel.ActivityIndicator[Route]
 	activityMu        sync.Mutex
 	proactiveActivity map[string][]func()
@@ -64,6 +66,10 @@ type Bot struct {
 }
 
 var errTelegramRuntimeAuthorization = errors.New("Telegram runtime authorization is unavailable: allowed_users has no valid user")
+
+// telegramBotGeneration orders adapter generations so a delayed getMe from a
+// superseded run can never displace a newer verified registration.
+var telegramBotGeneration atomic.Uint64
 
 // Topic rename bounds. The already-renamed set is deliberately in-memory: a
 // fresh process starts empty, so the first automatic rename after a restart
@@ -94,6 +100,7 @@ func NewWithIdentityStore(cfg config.Telegram, token, identityPath string) *Bot 
 		timeout = 20 * time.Second
 	}
 	bot := &Bot{config: cfg, token: token, client: &http.Client{Timeout: timeout}, baseURL: "https://api.telegram.org", identity: NewIdentityStore(identityPath), authLost: make(chan struct{}), listen: net.Listen, proactiveActivity: map[string][]func(){}, retryWait: waitWithContext, renamedTopics: map[string]struct{}{}}
+	bot.botGeneration = telegramBotGeneration.Add(1)
 	bot.allowedUsers = func() []string { return cfg.AllowedUsers }
 	bot.activity = newTelegramActivity(bot, 4*time.Second)
 	return bot
@@ -147,7 +154,26 @@ func (b *Bot) AttachReplyWorker(worker *ReplyWorker) {
 }
 
 // accountID reports the verified bot account or zero before getMe.
-func (b *Bot) accountID() int64 { return b.me.ID }
+func (b *Bot) accountID() int64 { return b.verifiedIdentity().ID }
+
+// generation identifies this adapter instance. Every replacement receives a
+// strictly larger generation so the reply queue can refuse a stale delayed
+// registration without trusting call order.
+func (b *Bot) generation() uint64 { return b.botGeneration }
+
+// verifiedIdentity returns the current getMe-verified account snapshot.
+func (b *Bot) verifiedIdentity() telegramUser {
+	b.meMu.RLock()
+	defer b.meMu.RUnlock()
+	return b.me
+}
+
+// setVerifiedIdentity publishes one getMe-verified account snapshot.
+func (b *Bot) setVerifiedIdentity(identity telegramUser) {
+	b.meMu.Lock()
+	b.me = identity
+	b.meMu.Unlock()
+}
 
 // logReplyQueue records one content-free queue diagnostic for a refusal that
 // happened before the queue could own the record.
@@ -169,7 +195,8 @@ func (b *Bot) deliverFinal(ctx context.Context, route Route, text string, replyT
 	if b.replies == nil {
 		return b.send(ctx, route, text, replyTo)
 	}
-	if b.me.ID <= 0 {
+	identity := b.verifiedIdentity()
+	if identity.ID <= 0 {
 		b.logReplyQueue("suppressed", "reason=unverified")
 		return errReplyQueueGenerationLost
 	}
@@ -182,7 +209,7 @@ func (b *Bot) deliverFinal(ctx context.Context, route Route, text string, replyT
 		plain[index] = markdownfmt.TelegramChunkPlainText(chunk)
 	}
 	err := b.replies.enqueue(replyRecord{
-		BotID:          b.me.ID,
+		BotID:          identity.ID,
 		Conversation:   route.Conversation(),
 		SenderID:       sender.ID,
 		SenderUsername: normalizeUsername(sender.Username),
@@ -224,7 +251,8 @@ func (b *Bot) sendQueuedChunk(ctx context.Context, route Route, text string, rep
 // a suspendable generation failure; a revoked recipient or group sender is
 // reported as a permanent suppression. Neither spends a retry round.
 func (b *Bot) authorizeQueuedRecord(record replyRecord) error {
-	if b.me.ID <= 0 || record.BotID != b.me.ID {
+	identity := b.verifiedIdentity()
+	if identity.ID <= 0 || record.BotID != identity.ID {
 		return errReplyQueueGenerationLost
 	}
 	if err := b.requireRuntimeAuthorization(); err != nil {
@@ -418,17 +446,27 @@ func (b *Bot) Run(ctx context.Context, handler channel.Handler) error {
 		b.reportStatus(channel.ConnectionError, err.Error())
 		return err
 	}
-	_ = json.Unmarshal(result, &b.me)
-	if b.me.ID <= 0 {
+	var identity telegramUser
+	_ = json.Unmarshal(result, &identity)
+	b.setVerifiedIdentity(identity)
+	if identity.ID <= 0 {
 		err := errors.New("Telegram getMe returned no verified bot identity")
 		b.reportStatus(channel.ConnectionError, err.Error())
 		return err
 	}
 	// Only a getMe-verified generation registers with the primary-owned
 	// worker, and only for its own Run lifetime. Queued records are bound to
-	// this verified account and are never delivered through another bot.
+	// this verified account and are never delivered through another bot. A
+	// run whose context was cancelled or revoked while getMe was in flight,
+	// or whose generation was already replaced, must never displace or later
+	// clear the live replacement.
 	if b.replies != nil {
-		b.replies.attachBot(b)
+		if b.revoked.Load() || !b.replies.attachBot(ctx, b) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return errReplyQueueGenerationLost
+		}
 		defer b.replies.detachBot(b)
 	}
 	if err := b.registerCommands(ctx); err != nil {
@@ -613,7 +651,7 @@ func (b *Bot) reportStatus(state channel.ConnectionState, detail string) {
 			detail = errTelegramRuntimeAuthorization.Error()
 		}
 		status := channel.ConnectionStatus{Name: b.Name(), State: state, Detail: detail}
-		if username := telegramUsername(b.me.Username); username != "" {
+		if username := telegramUsername(b.verifiedIdentity().Username); username != "" {
 			status.Identity = "@" + username
 			status.Link = "https://t.me/" + username
 		}
@@ -981,10 +1019,11 @@ func (b *Bot) groupAllowed(message *telegramMessage) bool {
 	case "off":
 		return false
 	default:
-		username := strings.ToLower(strings.TrimPrefix(b.me.Username, "@"))
+		identity := b.verifiedIdentity()
+		username := strings.ToLower(strings.TrimPrefix(identity.Username, "@"))
 		body := strings.ToLower(firstNonempty(message.Text, message.Caption))
 		mentioned := username != "" && strings.Contains(body, "@"+username)
-		replied := message.ReplyToMessage != nil && message.ReplyToMessage.From.ID == b.me.ID
+		replied := message.ReplyToMessage != nil && message.ReplyToMessage.From.ID == identity.ID
 		return mentioned || replied
 	}
 }

@@ -53,10 +53,19 @@ const (
 	// Enqueue signals the worker immediately, so this only bounds how often
 	// an idle worker looks for externally changed state.
 	replyQueueScanInterval = 5 * time.Second
+	// replyQueueRoundBudget bounds one reserved delivery round, including
+	// every chunk, the HTML fallback, and each reauthorization. It matches
+	// the ordinary text-delivery budget so a queued reply can never run
+	// longer than a direct send.
+	replyQueueRoundBudget = telegramTextDeliveryBudget
+	// replyQueueClaimMargin is the fixed safety margin between the end of a
+	// delivery round and the expiry of its cross-process claim.
+	replyQueueClaimMargin = time.Minute
 	// replyQueueClaimDuration bounds how long one delivery attempt may hold
-	// its cross-process claim. It exceeds the complete text-delivery budget
-	// so a live attempt is never reclaimed while it can still be sending.
-	replyQueueClaimDuration = telegramTextDeliveryBudget + time.Minute
+	// its cross-process claim. It exceeds the complete delivery round budget
+	// by the margin so a live attempt is never reclaimed while it can still
+	// be sending.
+	replyQueueClaimDuration = replyQueueRoundBudget + replyQueueClaimMargin
 	// replyQueueMaxScanEntries bounds one directory enumeration so a hostile
 	// or damaged directory cannot consume unbounded memory.
 	replyQueueMaxScanEntries = 4096
@@ -118,6 +127,11 @@ var (
 	// live route policy no longer admits the original recipient or group
 	// sender. The record is permanently suppressed until expiry.
 	errReplyQueueRecipientRevoked = errors.New("telegram reply queue recipient is no longer authorized")
+	// errReplyQueueRoundDeadline marks one reserved delivery round that
+	// reached its deadline. Unlike owner or generation cancellation, an
+	// expired round spends its attempt and schedules the next one after the
+	// failure completed.
+	errReplyQueueRoundDeadline = errors.New("telegram reply queue delivery round expired")
 )
 
 // replyRecord is one durable final reply. HTML and Plain carry the exact
@@ -212,6 +226,7 @@ type OwnerGuard func(action func() error) (bool, error)
 // generation with a different account never receives another bot's reply.
 type replyQueueBot interface {
 	accountID() int64
+	generation() uint64
 	authorizeQueuedRecord(record replyRecord) error
 	sendQueuedChunk(ctx context.Context, route Route, text string, replyTo int64, html bool) error
 }
@@ -261,8 +276,9 @@ type replyQueue struct {
 	enqueueMu sync.Mutex
 	sequence  uint64
 
-	botMu sync.Mutex
-	bot   replyQueueBot
+	botMu         sync.Mutex
+	bot           replyQueueBot
+	botGeneration uint64
 
 	mu            sync.Mutex
 	active        map[string]struct{}
@@ -286,18 +302,32 @@ func newReplyQueue(directory string) *replyQueue {
 	}
 }
 
-// attachBot registers the verified adapter after getMe. Only one generation
-// is verified at a time; detach removes exactly that generation.
-func (q *replyQueue) attachBot(bot replyQueueBot) {
+// attachBot registers one verified adapter generation after getMe. A stale
+// generation whose run context was already cancelled, or whose generation is
+// older than the registered one, is refused so a delayed getMe can never
+// displace a live replacement. The successful caller owns the matching
+// detachBot call.
+func (q *replyQueue) attachBot(ctx context.Context, bot replyQueueBot) bool {
+	if bot == nil {
+		return false
+	}
 	q.botMu.Lock()
+	defer q.botMu.Unlock()
+	if ctx.Err() != nil || bot.generation() < q.botGeneration {
+		return false
+	}
 	q.bot = bot
-	q.botMu.Unlock()
+	q.botGeneration = bot.generation()
 	q.wakeWorker()
+	return true
 }
 
+// detachBot removes exactly the registered generation. Both the pointer and
+// the generation must still match, so an older generation's exit can never
+// clear a newer replacement.
 func (q *replyQueue) detachBot(bot replyQueueBot) {
 	q.botMu.Lock()
-	if q.bot == bot {
+	if q.bot == bot && q.botGeneration == bot.generation() {
 		q.bot = nil
 	}
 	q.botMu.Unlock()
@@ -353,10 +383,12 @@ func (q *replyQueue) wakeWorker() {
 }
 
 // sweep dispatches at most one due record per canonical conversation and
-// bounds total concurrency. A route whose oldest record is not due yet keeps
-// every later record behind it, preserving FIFO order. Expiry, stopped-state
-// retention, and confirmed-delivery cleanup proceed without any verified
-// bot, so an orphaned queue is still bounded while Telegram is disabled.
+// bounds total concurrency. The oldest live record of a route keeps every
+// later record behind it, whether it is not due yet or still claimed by an
+// in-flight attempt from another generation, preserving FIFO order across
+// takeovers. Expiry, stopped-state retention, and confirmed-delivery cleanup
+// proceed without any verified bot, so an orphaned queue is still bounded
+// while Telegram is disabled.
 func (q *replyQueue) sweep(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
@@ -371,13 +403,23 @@ func (q *replyQueue) sweep(ctx context.Context) {
 	var order []string
 	for _, header := range headers {
 		record := header.record
-		if !record.ExpiresAt.After(now) {
-			q.expire(header)
+		if q.claimActive(record, now) {
+			// A live cross-process claim owns its route until it is released,
+			// expires, or is reclaimed. The claimed head stays in the route
+			// list so a younger same-route reply can never overtake it, while a
+			// terminal record neither blocks nor mutates under another
+			// generation.
+			if record.Stopped || record.Acked >= len(record.HTML) {
+				continue
+			}
+			if _, exists := byRoute[record.Conversation]; !exists {
+				order = append(order, record.Conversation)
+			}
+			byRoute[record.Conversation] = append(byRoute[record.Conversation], header)
 			continue
 		}
-		if q.claimActive(record, now) {
-			// Another generation owns an in-flight attempt; never reclaim it
-			// early.
+		if !record.ExpiresAt.After(now) {
+			q.expire(header)
 			continue
 		}
 		if record.Stopped {
@@ -399,10 +441,17 @@ func (q *replyQueue) sweep(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		header := byRoute[conversation][0]
+		if !q.botEligible(header.record) {
+			// The head is bound to another account or no verified bot is
+			// registered. Leave it queued, still blocking younger same-route
+			// replies for FIFO, without claiming the route or spending one of
+			// the bounded concurrency slots on a dispatch that must refuse.
+			continue
+		}
 		if !q.claim(conversation) {
 			continue
 		}
-		header := byRoute[conversation][0]
 		select {
 		case q.sem <- struct{}{}:
 		default:
@@ -442,6 +491,68 @@ func (q *replyQueue) release(conversation string) {
 
 func (q *replyQueue) claimActive(record replyRecord, now time.Time) bool {
 	return record.Claim != nil && record.Claim.Until.After(now)
+}
+
+// botEligible reports whether the currently registered verified generation
+// can deliver one record. sweep checks it before spending a bounded
+// concurrency slot, so foreign-account and bot-less route heads never starve
+// a deliverable route; dispatch rechecks it under the owner guard.
+func (q *replyQueue) botEligible(record replyRecord) bool {
+	bot := q.activeBot()
+	return bot != nil && bot.accountID() == record.BotID
+}
+
+// roundExpired reports whether one reserved delivery round passed its
+// deadline. The injected clock is authoritative so deterministic scheduling
+// tests can drive expiry, while the derived context additionally cancels any
+// in-flight provider request at the same boundary.
+func (q *replyQueue) roundExpired(roundCtx context.Context, deadline time.Time) bool {
+	return !q.now().Before(deadline) || roundCtx.Err() != nil
+}
+
+// replyRequestDeadline returns the earlier of one round's deadline and the
+// record's expiry. No provider request may outlive either boundary.
+func replyRequestDeadline(roundDeadline, expiresAt time.Time) time.Time {
+	if expiresAt.Before(roundDeadline) {
+		return expiresAt
+	}
+	return roundDeadline
+}
+
+// sendChunkBounded performs exactly one provider request bounded by the
+// earlier of the round deadline and the record expiry. The remaining budget
+// is recomputed at dispatch time, so a clock that advanced past the boundary
+// after the caller's preflight still issues no request.
+func (q *replyQueue) sendChunkBounded(roundCtx context.Context, bot replyQueueBot, route Route, text string, replyTo int64, html bool, deadline time.Time) error {
+	remaining := deadline.Sub(q.now())
+	if remaining <= 0 {
+		return errReplyQueueRoundDeadline
+	}
+	requestCtx, cancel := context.WithTimeout(roundCtx, remaining)
+	defer cancel()
+	return bot.sendQueuedChunk(requestCtx, route, text, replyTo, html)
+}
+
+// expireAttempt resolves one reserved round whose record expired before the
+// remaining chunks could be sent. Confirmed chunks and the spent attempt stay
+// persisted, and the record itself stays on disk for the ordinary sweep
+// expiry cleanup, which removes it on the next pass.
+func (q *replyQueue) expireAttempt(fence replyFence) {
+	_, outcome := q.fencedMutation(fence.name, fence.record.Revision, fence.nonce, func(record *replyRecord) bool {
+		if claim := record.Claim; claim == nil || claim.Nonce != fence.nonce {
+			return false
+		}
+		record.Claim = nil
+		return true
+	})
+	switch outcome {
+	case replyFenceApplied:
+		q.event("expired")
+	case replyFenceLost:
+		q.event("suppressed", "reason=generation")
+	case replyFenceFailed:
+		q.reportStorage("expire")
+	}
 }
 
 // replyDue reports whether one record's persisted next-attempt time arrived.
@@ -518,7 +629,9 @@ func (q *replyQueue) dispatch(ctx context.Context, header replyHeader) {
 		}
 		previousAttempts, previousNext := record.Attempts, record.NextAttempt
 		record.Attempts++
-		record.NextAttempt = now.Add(replyQueueRetryDelay(record.Attempts))
+		// The next-attempt time is persisted by the failure handler from the
+		// failed attempt's completion, so a slow attempt never shortens its own
+		// backoff. Until then the claim alone tracks the reservation.
 		record.Claim = &replyClaim{
 			Owner:            q.owner,
 			Nonce:            q.newNonce(),
@@ -542,13 +655,45 @@ func (q *replyQueue) dispatch(ctx context.Context, header replyHeader) {
 	}
 }
 
-// attempt delivers the remaining chunks of one reserved record. It
-// revalidates authorization immediately before every chunk and before the
-// HTML fallback, advances the acknowledged cursor only after a confirmed
-// chunk, and removes the record only after the final acknowledgement was
-// persisted and the unlink succeeded.
+// attempt delivers the remaining chunks of one reserved record inside one
+// bounded delivery round. Every provider request is bounded by the earlier
+// of the round deadline and the record's expiry, so no chunk or fallback
+// starts after the record expires. It revalidates authorization immediately
+// before every chunk and before the HTML fallback, advances the acknowledged
+// cursor only after a confirmed chunk, and removes the record only after the
+// final acknowledgement was persisted and the unlink succeeded. The round
+// shares the ordinary text-delivery budget: reaching it spends the attempt
+// and schedules the next round from the failure's completion, while owner or
+// generation cancellation rolls the reservation back instead. An expiry
+// mid-round preserves every confirmed chunk for the ordinary cleanup.
 func (q *replyQueue) attempt(ctx context.Context, fence replyFence) {
 	record := fence.record
+	claim := fence.record.Claim
+	if claim == nil {
+		// A reservation always carries its claim; without one the record was
+		// already resolved by another mutation.
+		return
+	}
+	if ctx.Err() != nil {
+		// Owner shutdown is a refunded cancellation, never a spent round.
+		q.suspend(fence, "cancelled")
+		return
+	}
+	roundDeadline := claim.Until.Add(-replyQueueClaimMargin)
+	deadline := replyRequestDeadline(roundDeadline, record.ExpiresAt)
+	now := q.now()
+	if !now.Before(record.ExpiresAt) {
+		// The record expired before this round could send anything. Keep its
+		// acknowledged progress for the ordinary expiry cleanup.
+		q.expireAttempt(fence)
+		return
+	}
+	if !now.Before(roundDeadline) {
+		q.failed(fence, errReplyQueueRoundDeadline)
+		return
+	}
+	roundCtx, cancel := context.WithTimeout(ctx, deadline.Sub(now))
+	defer cancel()
 	route, err := ParseConversation(record.Conversation)
 	if err != nil {
 		q.suppress(fence, "invalid")
@@ -557,6 +702,16 @@ func (q *replyQueue) attempt(ctx context.Context, fence replyFence) {
 	for record.Acked < len(record.HTML) {
 		if ctx.Err() != nil {
 			q.suspend(fence, "cancelled")
+			return
+		}
+		if !q.now().Before(record.ExpiresAt) {
+			// The record expired between chunks. No later chunk may be sent;
+			// keep every confirmed chunk for the expiry cleanup.
+			q.expireAttempt(fence)
+			return
+		}
+		if q.roundExpired(roundCtx, roundDeadline) {
+			q.failed(fence, errReplyQueueRoundDeadline)
 			return
 		}
 		bot := q.activeBot()
@@ -579,7 +734,7 @@ func (q *replyQueue) attempt(ctx context.Context, fence replyFence) {
 		if record.PlainMode {
 			chunk = record.Plain[record.Acked]
 		}
-		sendErr := bot.sendQueuedChunk(ctx, route, chunk, replyTo, html)
+		sendErr := q.sendChunkBounded(roundCtx, bot, route, chunk, replyTo, html, deadline)
 		if sendErr != nil && html && isTelegramEntityParseFailure(sendErr) {
 			// Persist the downgraded mode before the fallback request so a
 			// later round never attempts HTML again. The fallback stays inside
@@ -594,17 +749,38 @@ func (q *replyQueue) attempt(ctx context.Context, fence replyFence) {
 			}
 			fence.record = updated
 			record = updated
-			// The fallback is its own provider request: revalidate the full
-			// authorization immediately before it, exactly like any chunk.
+			// The fallback is its own provider request: prove the round is
+			// still open, the record is unexpired, and the full authorization
+			// still admits it immediately before dispatch.
+			if ctx.Err() != nil {
+				q.suspend(fence, "cancelled")
+				return
+			}
+			if !q.now().Before(record.ExpiresAt) {
+				q.expireAttempt(fence)
+				return
+			}
+			if q.roundExpired(roundCtx, roundDeadline) {
+				q.failed(fence, errReplyQueueRoundDeadline)
+				return
+			}
 			if err := bot.authorizeQueuedRecord(record); err != nil {
 				q.authorizationFailure(fence, err)
 				return
 			}
-			sendErr = bot.sendQueuedChunk(ctx, route, record.Plain[record.Acked], replyTo, false)
+			sendErr = q.sendChunkBounded(roundCtx, bot, route, record.Plain[record.Acked], replyTo, false, deadline)
 		}
 		if sendErr != nil {
 			if ctx.Err() != nil || errors.Is(sendErr, errReplyQueueSuspended) {
 				q.suspend(fence, "suspended")
+				return
+			}
+			if !q.now().Before(record.ExpiresAt) {
+				q.expireAttempt(fence)
+				return
+			}
+			if q.roundExpired(roundCtx, roundDeadline) {
+				q.failed(fence, errReplyQueueRoundDeadline)
 				return
 			}
 			q.failed(fence, sendErr)
@@ -727,17 +903,22 @@ func (q *replyQueue) failed(fence replyFence, sendErr error) {
 			record.Attempts = previousAttempts
 			record.NextAttempt = previousNext
 		case replyFailurePermanent:
+			// The wait is persisted from this failure's completion so a later
+			// round can never be scheduled before the failure was observed.
+			record.NextAttempt = now.Add(replyQueueRetryDelay(record.Attempts))
 			record.Stopped = true
 			record.StopReason = replyStopPermanent
-		case replyFailureRateLimited:
-			if retryAt := now.Add(retryAfter); retryAt.After(record.NextAttempt) {
-				record.NextAttempt = retryAt
-			}
-			if record.Attempts >= replyQueueMaxAttempts {
-				record.Stopped = true
-				record.StopReason = replyStopExhausted
-			}
 		default:
+			// Retryable failures and bounded rate limits both wait from the
+			// completion of the failed attempt. A usable retry_after is honored
+			// only when it lands later than the scheduled round.
+			next := now.Add(replyQueueRetryDelay(record.Attempts))
+			if class == replyFailureRateLimited {
+				if retryAt := now.Add(retryAfter); retryAt.After(next) {
+					next = retryAt
+				}
+			}
+			record.NextAttempt = next
 			if record.Attempts >= replyQueueMaxAttempts {
 				record.Stopped = true
 				record.StopReason = replyStopExhausted
@@ -865,12 +1046,17 @@ func (q *replyQueue) removeFenced(name string, revision int64, nonce string) rep
 }
 
 // classifyReplySendFailure maps one provider or transport failure to the
-// approved queue policy. Timeouts, resets, premature EOF, and API 5xx are
-// retryable; a 429 inside the bounded retry_after window defers without an
-// extra request; a 429 outside it fails like the ordinary delivery policy,
-// without clipping; 400 and 403 are permanent.
+// approved queue policy. An expired delivery round spends its attempt like
+// any retryable failure, while a cancelled owner context stays a generation
+// refund. Timeouts, resets, premature EOF, and API 5xx are retryable; a 429
+// inside the bounded retry_after window defers without an extra request; a
+// 429 outside it fails like the ordinary delivery policy, without clipping;
+// 400 and 403 are permanent.
 func classifyReplySendFailure(err error) (replyFailureClass, time.Duration) {
 	if err == nil {
+		return replyFailureRetryable, 0
+	}
+	if errors.Is(err, errReplyQueueRoundDeadline) {
 		return replyFailureRetryable, 0
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errReplyQueueSuspended) {
